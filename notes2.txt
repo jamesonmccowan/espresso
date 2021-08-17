@@ -1,0 +1,262 @@
+real
+	int
+		bool
+
+asm {
+	(func (export "int+"))
+}
+
+struct int {
+	value: i64;
+	
+	strict +(a: any, b: any): any {
+		if(a is none) return b;
+		
+		if(this === a) {
+			switch(typeof b) {
+				case bool: return a as i64 + i64(b as bool);
+				case int: return a as i64 + b as i64;
+				case real: return f64(a as i64) + b as f64;
+				
+				case string: return string.concat(int.string(a), b);
+				
+				default: return b->b.proto::+(a, b);
+			}
+		}
+		else {
+			return a.int() as i64 + b as i64;
+		}
+	}
+	
+	-(a, b) {
+		if(a is none) return strict { -b as i64 };
+		
+		if(this === a) {
+			switch(b.proto) {
+				case bool: strict {
+					return x as i64 - i64(b as bool);
+				}
+				
+				case int: strict {
+					return a as i64 - b as i64;
+				}
+				
+				case real: strict {
+					return f64(a as i64) - b as f64;
+				}
+				
+				default:
+					return b->b.proto::-(a, b);
+			}
+		}
+		else {
+			return a.int() - b;
+		}
+	}
+	
+	*(a, b) {
+		if(this === a) {
+			switch(b.proto) {
+				case bool: strict {
+					return x as i64 * i64(b as bool);
+				}
+			}
+		}
+	}
+}
+
+There's a complex taxonomy of types here which we have to wrangle somehow, particularly given polymorphic types have the same auto-coercing behaviors
+* smi = 28 (?) bits on 32-bit, 63 bits on 64-bit
+* heap integer = largest size available
+* long = arbitrary-precision integer
+* These types should be transparent, presenting to user code with a single "int" type
+* Might be able to combine long and heap integer implementations, using an algorithm which is identical to heap integer 
+
+Semantics here: Strict mode has strict typing, only allowing native types. To use variables from the enclosing scope, adding "as type" is mandatory. This expression throws a TypeError if the type of the operand isn't EXACTLY that type. The point of this, at least in this context, is to define the polymorphic operators in terms of the native operators which require known types and for both operands to be the same type, thus detangling it from whatever language or JIT library is being used to implement the language.
+
+There should also be strict functions which require all parameters to be typed and have similar draconian typing rules but otherwise share the same syntax. These throw TypeError if the types aren't exact.
+
+Native types include:
+* any (must be explicit, operators aren't respected *including* indexing anything except proto and size)
+  - supported operations: .proto .size is as === !==
+* bool u8 i8 u16 i16 u32 i32 u64 i64 f32 f64
+* dict
+* struct
+* type[]
+* (a, b, c) tuple
+
+Note that objects are forbidden, they must be passed as a struct (which only supports indexing operations)
+
+Idea: 4 levels of code, asm, strict, static, and dynamic.
+* asm uses a generic but consistent assembler syntax which compiles to a simple bytestring interpolation - it isn't executed as-is, but rather evaluates to a bytestring which is then inserted into the appropriate memory.
+  - I played around with making such an assembly syntax a few years ago, maybe look for those notes?
+  - If we go this route a common idiom might be generators which yield assembly bytestrings, which would look like `yield asm { ... }`
+  - Though this wouldn't take into consideration the target dependence of assembly, maybe `asm { x86 { ... } arm { ... } powerpc { ... } wasm { ... } }`
+* strict provides a C-like strict typing with espresso syntax. This level should be sufficient for JIT, as everything should eventually evaluate to it
+* static is the normal modality for espresso and is mostly restricted to having static scoping
+* dynamic to refer to a fourth level of code which has dynamic scope bindings as with REPL
+
+It's unclear to me what needs to be done about the asm level, too tired I guess. At minimum it needs to support strict code, but there's certain constructs which just don't boil down to strict code:
+* boxed values can't be defined by the language itself
+* don't have a way to define non-strict functions in terms of strict code
+
+Currently I think some of this confusion comes from the fact that we decided to define polymorphic operator overloads in terms of strict code - thus enabling us to skip defining callbacks in whatever the host language is. But we want to be self-hosted, ideally, so what does that look like?
+
+To compile a self-hosting interpreter we'd want all (some?) of the code to be compiled to be in strict mode, which ensures that there isn't any runtime ambiguity because it disallows implicit boxing. To self-host it would also need a notion of what machine code to emit, which is where asm comes in. Asm being a construct only available to the top level of execution, lest we start breaking safety. Which is odd, because it sort of uses a superset of the language to ease development - parsing asm expressions would only be done for the top level, but not subsequent levels
+
+Alternatively we could eschew explicit asm statements for a higher level bytecode which a lot of JITs seem to do. Have language constructs evaluated to a lower level code with strict semantics and then that code is sent to be assembled. Which is just strict mode, right? Writing a JIT we could just worry about strict mode code and use it as a platform for the higher level code, using strict mode as a high level intermediate language. But then how do we translate higher concepts to strict mode? Like boxed values
+
+Strict mode represents boxed values with the opaque type "any" - the actual implementation of the type is completely unspecified, only defining a few operations for type introspection and explicit conversion. So, the format of any is up to the backend as it should be since it has a better idea of the limitations of boxing, eg 64-bit backends can use NaN-boxing instead of pointer tagging which gives more inline values
+
+What about the JIT aspect then? Code generation ordinarily requires generating the code which is then sent to the assembler, but if we're RUNNING strict mode, that isn't going anywhere. Could we have some kind of bytecode which expresses strict mode semantics maybe? Then say it parses "function x(a, b) { return a + b }", the AST of that would be (function x (params a b) (return (+ a b))). Would we then lower that into strict mode? function x(a: any, b: any): any { return dispatch("+", a, b); } or something? If we can express everything as strict mode then may as well AOT right?
+
+Bytecode (currently):
+
+function "x" 2
+	param 1 -> %0
+	param 0 -> %A
+	add %A, %0 -> %A
+	return %A
+
+To get strict mode semantics here, we must:
+1. Verify a.proto has a shape (repeat for b.proto if fail)
+2. (a.proto as object)["+"] exists and is callable?
+3. Call that
+
+strict function x(a: any, b: any): any {
+	var p = a.proto;
+	if(p is object) {
+		var add = (p as object)["+"];
+		if(add implements callable) {
+			return a->add(a, b);
+		}
+	}
+	
+	p = b.proto;
+	if(p is object) {
+		var add = (p as object)["+"];
+		if(add implements callable) {
+			return b->add(a, b);
+		}
+	}
+	
+	throw new TypeError(f"Invalid operands for +");
+}
+
+---
+Maybe the "as" operator could return an intermediate value which is pre-offset into the value?
+
+Objects have the following format:
+Dict* shape (comparable to vptr)
+HeapValue slots[]
+
+A union can be considered as:
+Dict* shape
+HeapValue slots0[]
+HeapValue slots1[]
+...
+
+We only need one shape for the whole object (unlike multiple inheritance in C++) because it's arbitrarily malleable. This does add the caveat, however, that methods called on `this` from one of the parents need an offset into the slots corresponding to the subobject - no this is incorrect, slot resolution can be done at prototype creation, and prototype lookup is still proxied by ICs
+
+Design considerations for strict mode:
+* Static AOT compilation
+* No type inference - all types must be explicit
+* Implement native and performance-critical code using the same syntax
+
+Difficulties with strict mode:
+* How do we implement the GC when the system itself is supposed to rely on it?
+
+gcalloc(size) -> gcbytes
+
+struct ObjectArena {
+	blocks: u64[512];
+	markmap: u64[512];
+	
+	cells: GCObject[4096];
+	
+	
+}
+
+I still havent ever seen a vertically folding duck at the zoo.
+
+gcalloc(sizeof ObjectArena)
+
+x: i32[]
+y: *i32[] => array of i32 pointers
+z: *(i32[]) => pointer to i32 array
+
+*((i32, i32) => i32)[] == array of pointers to functions taking two i32s and returns an i32
+* The function type itself is a pointer to the PC of the function, making this a function pointer pointer
+
+i32[?] == i32 array with unknown size not stored in structure
+
+struct GCHeader {
+	data: u64;
+	size: u32;
+	data: u32;
+}
+
+int -> ptr ERROR
+*i32 
+
+Take a page from C#, have an "unsafe" context as well as "strict" (which C# doesn't have, it's always strict) - unsafe enables pointer types and operations
+
+Unsafe semantics:
+* An unsafe block must be in an unsafe function
+* A file containing unsafe code MUST be imported using "unsafe import"
+
+ptr.x
+
+function* fib(n: i32): i32 {
+	var a = 0, b = 1;
+	while(b < n) {
+		yield b;
+		a, b = b, a + b;
+	}
+}
+
+i32 is always passed by value unboxed
+
+fib(0)
+* boxed 0
+* fib has native binding, convert boxed 0 to unboxed i32
+
+One major issue I see with the naive implementation is that whether or not a value is passed boxed or unboxed depends on the particular type. If it's in the set of "unboxed" types (including struct?), then it's passed by value - otherwise it's boxed. But I don't like how the underlying implementation changes in a way you just have to know
+
+So I think it's best to restrict unboxed types to strict contexts, which changes semantics. The whole point is to give the option to sacrifice flexibility for speed
+
+Need to be able to pass struct by value, and also by reference as a GC object if we want to use it in managed code.
+
+proto is mutable, struct is not. Struct is defined by its definition, proto is more or less a bag of methods with a hint at how much to allocate
+
+Strict function requirements:
+* All types must be strict
+  - i8 u8 i16 u16 i32 u32 i64 u64 f32 f64 (machine types)
+  - any (implementation-defined variant type)
+  - struct (machine type aggregate)
+  - bytes buffer
+  - aggregate types (safely encapsulated pointers)
+    * list (resizeable)
+	* tuple (immutable)
+	* object (associative array with cacheable lookups)
+
+tuple:gco(items:any[])
+list:gco(items:*gco)
+dict:gco(u32, u32, proto:any, indices:u8[], items:any[])
+object:gco(shape:*dict, slots:any[])
+
+object
+* Direct lookup (eg ob["property"])
+* Slot lookup (may fail on non-slotted entries)
+
+we want a way to include unsafe code in safe code in a way which is safe
+
+For example, suppose we wanted to implement Buffer
+* Security risk: if a file can contain unsafe code without realizing
+  - But also, we want to be able to permit unsafe code without requiring it - like eg importing a library which has an unsafe dependency. Buffer is a good example of that, or any other native data structure implementation that isn't made of existing primitives. Having the dependency would need to poison everything that depends on that even indirectly
+
+Node gets around this with .node binaries, which must be precompiled. It doesn't allow arbitrary native code to execute because a compilation step must be executed first.
+
+C# gets around this because it's a compiled language, even though it runs on a VM. When unsafe code (same semantics) is included in a module, it must be compiled with an /unsafe flag to permit its use. But, once the file is compiled it's considered "safe" and can be linked to other files without issue.
+
+So let's do this - "unsafe import" is still a thing, and it specifies that the file to be imported may contain unsafe code, mostly used for rapid prototyping. For actual libraries however, they can be AOT compiled into object files which are treated as "safe". The extra compilation step is considered part of the safety, where arbitrary machine code can't be run without effort to enable it. If a unit is compiled, we know it's either safe or was compiled with the /unsafe flag

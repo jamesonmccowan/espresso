@@ -1,0 +1,11 @@
+file = {statement}
+statement = (expr | if | dowhile | while | for | each) ";"?
+expr = literal | "(" expr ")" | expr binop expr | unop expr
+literal = ident | suffixed | real | "inf" | "nan" | none" | function | list | object
+suffixed = (string | int) :: identifier
+string = ([rbfc]*)('...' | "..." | '''...''' | """...""")
+int = "0"("b" [01_]+ | "o" [0-7_]+ | "x" [0-9a-fA-F_]+) | [0-9_]+
+real = ([0-9_]+ "." [0-9_]* | [0-9_]* "." [0-9_]+) ([eE] [-+]? [0-9_])?
+list = "[" (expr {"," expr})? "]"
+object = "{" (entry {"," entry})? "}"
+entry = ident | string 

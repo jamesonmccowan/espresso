@@ -1,0 +1,551 @@
+? meta-operator "optional"
+eg: return? throw?
+	op ? operand = if(operand) op(operand)
+Overloaded semantics
+	k :? v meaning k:v pair if v is truthy
+	obj .? val meaning obj.val only if val is truthy
+* The whole expression containing ? is unevaluated if its operand is falsey
+  - eg x = x.?next translates to if('next' in x) x = x.next
+  - this might be less useful, maybe subexpression semantics is to replace with nil?
+
+Assignment operator x := y -> Object.assign(x, y)
+Nullish coalescing operator ??
+
+= meta-operator "inplace"
+Rather than defining multiple in-place operators, they're defined in one go using a meta-operator =
+
+x::y(z, ...args) = x.y.call(z, ...args)
+* eg Array::concat(arrayLike)
+
+Going with the first idea, the parser could only understand ASCII and leave translation to the ZIO abstraction. That way, we could do stuff like whitespace -> space, newlines -> \n, etc so the parser never has to check more than those basic characters. It also adds flexibility to the source of the buffer stream, which can be encoded any which way so long as it boils down to ascii. To enable this, we could also have some kind of parser-only identifier escape to support name mangling.
+
+Ok, that gives us the following schema:
+* ZIO acts as a buffered stream abstraction which is accessed like an ASCII string
+* ZIO implementations can add conversions from different encodings to a canonical ASCII representation
+* This gives us a restricted ASCII subset of:
+  - \n, 0x20:0x7F
+  - Keep $ as a start character like JS
+
+Actually, better idea: Abuse a Lua-like ignorance of extended ascii, using 0x80, 0x81, and 0x82 as DLE, SO, and SI respectively. This has the benefit of a much simpler ctype check and takes care of embedding UTF-8 directly rather than trying to convert to hex. According to the UTF-8 spec, these characters can only occur in continuation bytes anyway, and so should be invalid according to UTF-8 rules normally.
+
+Because of all this, the core parser can act like a simple state machine on an ASCII codeset and has infinite extensibility wrt actual encoding using a stateless character conversion. Note that this filtering mechanism has to be implemented in esp_Reader, as it would otherwise hamper ASCII reading with an extra function call per character.
+
+Let's get a core feature list:
+* Monomorphic functions (possibly with hidden polymorphism ala V8)
+* Prototype-based inheritance system
+* Language-level support for native code interfacing (eg binding native functions/objects directly with small wrappers)
+* Use the prototyping system to make the interpreter threadsafe by having the innermost behaviors readonly, while overrides are thread-local
+* Do the same (by default) for imports, but without freezing the module - allows local mutability which doesn't affect the module, and monkey-patching if needed
+* In general, default behavior should tend towards static and type-safe, with monkey-patching allowed with great potential deoptimization costs
+* Base grammar should be LL - semantic layer can be more complex
+* Reuse keywords where possible
+* Parser operates on ASCII using a custom extension - unicode can be supported by supplying UTF-8, so long as 1. whitespace is converted to ' ', 2. newlines are converted to '\n', and 3. identifier start characters are prepended with '\x7F' (which will be otherwise ignored)
+* Get rid of old legacy features no one uses: many string escapes, 0-prefixed octal, unsigned integers, special handling for control chars (eg isspace(x) = x <= ' ')
+* Main idea is to live up to the name: Espresso is all the best features in the smallest/simplest package.
+
+To help with operator overloading, it's probably a good idea to only support the base ops and not assignment ops (which add a whole layer of complexity and - conceptually speaking - are redundant, since inplace optimizations can be approximated using lazy evaluation). Similarly, we earlier decided to support all the comparison ops rather than extrapolating from the spaceship operator because it would imply strict ordering, but it's odd to add complexity to AVOID supporting something. If someone really wants an error they can throw one, otherwise whatever garbage value is returned is better than excess complexity.
+
+GC reference type:
+* Global
+* Eternal - globally allocated, never destroyed, mutable
+* Native bindings - Dynamically created but immutable afterwards
+* VM data (stack preallocation)
+* Static size (eg tuples)
+* Old memory
+* Dynamic memory
+* Raw buffer (unaligned)
+
+Values with only one reference are prime candidates for relocation 
+
+Nomenclature:
+* Simple value = contained by the tagged union/nan box with no indirection
+* Managed value = simple value represents a pointer to GC-managed memory
+* Fixed = size of an underlying structure cannot change
+* Immutable = fixed and the data cannot change
+* Mutable = size and data is capable of changing
+* (Note: there is no unfixed immutable data as that is a contradiction)
+* Bare = structure is allocated outside GC-managed memory and must collect its own garbage 
+* Native = something unrelated to the GC-managed memory
+
+GC:
+* Simple types - none, bool, int, real, and empty objects
+* 4 basic pools - mutable bytes, immutable bytes, mutable object arrays, immutable object arrays
+* Mutable types always have a level of indirection, meaning they can have bare instantiations on the stack pointing to managed memory - eg the esp_Buffer structure has a size, capacity, and pointer to memory so that mutations of the underlying pointer won't change references to the object.
+* Immutable types don't have to worry about the underlying pointer changing so they don't need any indirection. (Note: not strictly true if we use a compacting GC) Structures like esp_String contain their data in-place and cannot be instantiated on the stack because they have no fixed size.
+* This has implications on the GC and how it interacts with native code - if we have a bare type on the stack, it obviously can't be garbage collected, and the data it points to can't either. The data it points to will never outlive the object itself, but may be replaced for reallocs. Thus we can say the object "owns" its data, and set the maximum lifetime to the object's lifetime.
+* Stack-allocated bare objects have their underlying pointer within managed memory which is not garbage-collected. Instead, the onus is on the native code to free its memory when the object becomes unreachable.
+* Similarly, bare immutable objects don't have a well-defined lifetime according to the GC and must be freed by the native code. In a manner of speaking, the pointer acts as their bare value
+
+Interesting ideas:
+* Unwrap using invert/negate and an all-ones tag
+* Use the fact that signed integer wrapping is generally undesirable to increase code space - cases where it would happen naturally can be made rigorous with a much more costly operation
+* Possibly use the fact that two's complement positive is unchanged but negative is inverted
+* Bias positive integer encoding over negative
+* Use float-encoded integers literally?
+* Bottom 3 bits can be used for tagging, not just literals
+
+We have two separate types for char vs string, particularly since char is easily represented as a simple value. This lets us encapsulate some of the weirder Python methods like isdigit() on normal strings and a chr/ord distinction. chars act like a special mixture of string and int. For instance, string has string*int = string.repeat(x) but char*int results in an int. "a" + 1 = "a1", "a" + char('a') = "aa". On reflection, I won't bother having char literals because it has a lot of possibilities to mess things up (eg ' '*10 is a commonish Python idiom, but if that were a char literal it would produce nonsense). Instead we can do things like s[x].isDigit() which doesn't do weird Pythonic things like check every character (or maybe it can still do that for strings, but without iteration for chars)
+
+break with expr()
+* Sets the value of the block being escaped
+
+do => block
+* explicitly use a do block as an immediately executed statement
+
+[...each(var x in y) x*2] = [...(function*() { each(var x in y) yield x*2; })()]
+
+Prototype chain lookup optimization: prototype is in the shape, not the object
+* Also: use IC to store which prototype had a method, requires a way to poison the IC (v8 uses a "ValidityCell" property on prototype shapes)
+
+Prototypes could be made immutable without changing much, but I think making prototype mutations possible adds a lot to potential expressiveness. JS usually implements this by making it very expensive - but we could instead add an extra layer of protection with data flow design making it harder to accidentally mutate the prototype. Eg, importing a module actually prototypes the original object, so changing its properties globally requires .proto first
+
+async function test() {
+	await async.sleep(1000);
+}
+
+test();
+
+1. start a new greenthread (push function context to the thread scheduler)
+2. original context keeps executing, then eventually switches to test
+3. test executes sleep(1000), then synchronizes with it (ala fork join)
+
+Dart uses a split concurrency model which streamlines the JS model - that is, single-threaded cooperative multitasking via a round-robin scheduler and event loop and true multitasking using isolates.
+
+Isolates could potentially be more lightweight in espresso because so much state is hidden by default, but I don't know enough Dart to be sure.
+
+That being said I think mimicking the JS concurrency model is ideal, possibly with some minor enhancements (eg empty await to yield control arbitrarily ala nextTick or language-level support for Promise.all/Promise.race). Particularly, it's significantly lower complexity than true greenthreads with roughly the same power
+
+JS actually might already resolve this problem internally, because afaik accessors are inheritable, which shouldn't be possible normally. One idea I had while trying to sleep was to have a property flag which says "never use own key", maybe "delegated"
+
+Also thought on closed vs open namespaces, naively they could both be implemented with ordinary objects. In a closed namespace, the dictionary would act as metadata, whereas in an open namespace it provides arbitrary extension. However, there's some key notes: first, the closed top level namespace of a module can be GC-pruned once it finishes executing, as if it were a function scope. Any globals captured by closures would be contained by upvals and thus remain live. So basically, closed namespaces only make sense in the context of an actively executing scope
+
+Open namespaces on the other hand implemented using objects is also problematic, because objects are optimized for defined-at-instantiation properties with support for arbitrary extension. An open namespace is expected to grow arbitrarily, so it would end up using just the dictionary. Since we're using contiguously allocated value arrays for dictionaries, it shouldn't be too difficult to transition this to act as if it were the slots of an object, thus allowing lookups by offset
+
+V8 invalidates the IC by keeping a reference to a boolean "validity cell", sort of like a weak reference. If it's false, the IC is flushed and slow prototype lookup is done again. This isn't too bad for V8 which creates new objects for every shape change, so the prototype/shape which is invalidated is trash. As a possible optimization for our use-case, we can use an int instead of a boolean which increments with each change to get a "version" token. If the versions differ, redo prototype lookup. This leaves an edge case, where the int would overflow - at this point we can stop incrementing the version and create a new object like V8 because if we reuse lower values, there's a (very small but nonzero) chance that a rare code path still has an older version
+
+V8 has a GC optimization for arrays: if all elements are inline values, there's no need for GC to scan them. eg if it's all ints, these aren't GC managed
+
+GC types:
+* Mark and sweep and invert (when grey set is empty, collect condemned set and invert white/black meaning)
+
+We have a clear distinction between static and dynamic memory - whether or not the size can change.
+* Dynamic
+  - Buffer (size + capacity + ptr(data)*1 = 16)
+  - List (size + capacity + ptr(data)*8 = 16)
+  - Dict (proto + ptr(keys)*8 = 16)
+  - Long (variable*8...)
+* Static
+  - String/bytes (size + data*v...)
+  - Objects (shape + slots*8...)
+  - Tuple/array (size + data*8...)
+  - Wrapped (shape + schema*1...)
+  - Function (ktab + code*1...)
+  - Closure (func + upvals*8...)
+  - NFunction (func + schema*1...)
+* Inline
+  - None/bool
+  - Int/real
+  - Char/smallstring
+  - Opaque
+  - CFunction
+
+Key difference between dynamic and static memory (other than resizeability) is that dynamic memory requires a constant-sized structure with a pointer to the dynamic part. This is because static memory never has to realloc its data so we can use the data (with a header) directly, whereas dynamic memory has to realloc and if we changed the reference every time the buffer moved, we'd have no way to update every reference to the object. As an interesting aside, this implies that (in general, some exotic objects may break this) the dynamic portion of a resizeable object has exactly one reference at any given time, suggesting it doesn't need to be GC'd - although any children would be
+
+Some ostensibly dynamic objects can be implemented as if they were static, eg long objects because they're defined to never have more than one reference (assignment copies memory)
+
+Compacting GC observation: if we do a complete scan of reachability, we will eventually visit every node and thus have the opportunity to update their references. One small bit of complexity is we need a way to distinguish a redirect pointer
+
+Possible idea: Continuous generational compacting GC
+* Try to keep older objects in lower memory
+* Don't have explicit generations, just an age gradient
+* Aim for eventual compaction - we don't care about compacting everything all at once, we can compact individual objects (problem: we no longer have a guarantee that we'll visit all objects and update references eventually)
+
+Is there any way to remove subgraphs from GC consideration? Like when a number of references are predicated on a single reference - at the very least, this could apply to uniquely-held upvals which can't escape, difficult to prove - actually no, impossible because anything you can do to the upval could call arbitrary code
+
+Idea: Dispense with the idea of extending objects entirely, leaving that up to dictionaries. Objects have a fixed size, and can be extended by using them as a prototype for a dictionary. This would have some level of consistency, since we already aren't allowing lists to be extended. This is kind of weird though, right? Objects have to have a shape dictionary to account for late (untyped) binding which we were using as a CoW metastructure, which enables promotion to dynamic objects. Actually, that has zero overhead unless you use it and adds a ton of flexibility.
+
+Lua GC notes:
+* Keeps all GC objects in a linked list
+* Tricolor mark and sweep
+* Generational: young, old (+2 minor sweep collections)
+* Minor sweep: only traverse young objects
+* Generational invariant: old can't point to young
+* If old points to young, added to "touched" list (also swept in minor phase)
+* Mutating a black object requires either forward or backward color: table goes black -> grey, or object goes white -> grey
+* Assignment to table goes black -> grey (best for container objects which tend to get several stores in succession)
+* Assignment to metatable moves white -> grey (best for objects with isolated stores)
+* Tables which are demoted back to gray added to special list for an atomic phase
+* Stack kept grey until the very end
+
+http://wiki.luajit.org/New-Garbage-Collector
+LuaJIT GC:
+* Request memory from OS called Arenas, split into 16-byte cells
+* 1+ cells makes a block
+* All objects in an arena are either traversable or not
+* Block and mark metadata separated from data
+* Huge blocks kept in separate arenas
+  - Always multiples of arena size
+  - No header, metadata stored in a hash table
+* Quad-color local to an arena
+* Newly allocated objects are grey-white, write barrier can check for just !grey
+* grey-black maintains a stack, grey-white can be freed as if it were white
+* Grey bit seems to act like a "dirty" bit
+* Modified generational GC (triggered by high death rate for young allocs)
+* Don't flip black -> white before a minor collection
+  - Only newly allocated blocks and dirty objects are traversed, pure black is assumed to be reachable (regardless of mutation)
+* Cell index can be derived from starting address by >>4 & LSB
+* Cell index always fits in 16 bits
+* Two bitmaps determine arena block status, block and mark
+  - Block=1 => First cell of a block
+  - Mark = white/black or padding/free
+* Allocator modes switch depending on fragmentation pressure
+  - Bump allocator (increment pointer)
+  - Fit allocator (fill holes)
+    * Setup bins for size classes using multiples of cell size -> powers of two
+	* Each bin is the anchor for a list of free blocks for that size class
+	* Bounded best-fit allocation first, fall back to first-fit
+	* First-fit can adapt, high miss rates => higher size classes searched first, high hit rate => smaller size classes
+* Write barrier: if(!grey) grey = 1 and if(black) push to sequential store buffer (SSB)
+* Mark bit only needs to be checked during mark phase, if collector is paused no check (since there's no black objects)
+* SSB buffer holding block addresses which triggered write barrier (must have at least one free cell)
+* SSB overflow -> convert addresses to cell indices and push to grey stacks
+* Use of SSB prevents the cache from being thrashed by GC data while the mutator is running
+* Grey stack: per-arena, cell indices of dark-grey blocks 
+* Objects removed from grey stack are turned black before traversal
+* Current arena processing continues until grey stack is empty
+* Grey queue: priority queue of arenas with non-empty grey stack ordered by stack size
+* Sweep phase has good cache locality because metadata for blocks is kept together. Don't have to traverse the actual data, just the metadata
+* Bitmap tricks allow bitwise parallel operations
+  - Major sweep: block' = block & mark, mark' = block^mark (free white blocks and turn black blocks into white blocks)
+  - Minor sweep: block' = block & mark, mark' = block|mark (free white blocks, preserve black blocks)
+  - Compare block and mark word gives status of last block in the word, eg block' < mark' => last block is free
+* ---
+* Write barrier triggered when an object with grey=1 is written to, and thus it needs to be revisited
+* Grey seems to correspond to "dirty", whether or not it needs to be revisited
+* White = maybe garbage, Black = probably not garbage
+* GC sweeping is done per-arena, which at first appears to break inter-arena references. But in fact, if a major sweep is done first this will mark any objects referred to in other arenas as black, and they will remain black for each minor collection. Then, a major collection marks everything as white and traverses all arenas. The key here is not resetting black -> white between minor collections
+
+Moving GC with conditional indirection?
+* If an object is moved, replace it with a pointer to its new location marked "moved"
+* If the mutator accesses it, it updates its reference to the new location
+* Because the mutator never propagates the old address, we can guarantee that by the end of a full sweep the old address is garbage
+* Alternatively, we could consider relocators to be specially-treated parts of accessibility analysis, and if they fail to be marked then they're garbage automatically
+
+ZGC:
+* Uses a forwarding table mapping old -> new address
+* Map only checked if the reference has a "bad color"
+* Remap bit set during mark phase, meaning "this object will be relocated by the end of this phase"
+
+My GC:
+* Quad-color mark and sweep kept arena-local for minor sweeps
+* Lazy compaction - if an object with the right size for a hole is found, copy contents to the hole and replace the original object with a pointer to the new address. Any accesses check the MSB for 0, and perform a second dereference and update their state. This forward-pointer is then eventually collected as garbage when all references are updated
+  - Problem: Needs a grey bit to participate in GC, right?
+  - Except, it can be considered as having "no children", so any access marks it black and the grey bit is redundant
+* Quipu structure to keep track of the holes
+* Prefer exact fit to bump
+* Need a way to recover the bump block
+
+Currently, deallocation pushes to the quipu. We can check deallocations for adjacency to the bump block, then trigger a bump recovery checking adjacent empty blocks. This could potentially conflict with the LIFO policy of the quipu, where old objects are allocated in smaller addresses hidden by later allocations, and new allocations prefer objects deallocated "recently" (ie closer to the bump block). The list is being grown, so we could keep it sorted in O(n) time - but this would require higher cache invalidation
+
+For now, let's go with the "good enough" approach. Keep the quipu structure as-is, do a quick check for bump adjacency, and if adjacent rebuild the bump pointer (basically ctz). To make this work, we need a way to determine from the last cell of an empty block how big it is. Easy, make blocks have a minimum size of 2 and set the last cell to a previous link. This gives us the size (rev->next - &rev) and O(1) updating
+
+Apparently V8 can get equal performance with pointer compression, using effectively half the memory. I want that. JerryScript goes even crazier by supporting 16 bit cptrs by default. Considering the level of repetition between the primitives, I think I'll try to abstract it one level further to a lower level
+
+Pointer always points to GCObject
+Bytes is an arbitrary number of bytes
+Array is a fixed-length sequence
+Table is a hash:int hashtable which can be reused
+Func uses opcodes
+CFunc uses a standardized format
+NFunc uses native calling conventions
+Closure contains upvals - only valid for Func
+
+Structure padding rules:
+* Every member has an address divisible by its size, padding is inserted /before/ a member to maintain this invariant
+* The struct as a whole has an address divisible by the largest member type
+
+define y.x = {
+	get() {},
+	set() {},
+	delete() {},
+	define() {}
+}
+
+Base design of the variant type on 4-byte words
+* On 32-bit platforms pointers are unencoded
+* On 64-bit, use cell-relative addressing (vs arena-relative addressing which uses a global address which may not be in cache. Many of the issues with cell-relative addressing are resolved simply by 1. only allowing references to objects, not cells and 2. having a heap-allocated wide pointer for references outside the range)
+* This avoids excessive waste, as normal scripts shouldn't exceed even a few MB, much less 4 GB.
+
+String optimization used by V8 and SpiderMonkey: ConsString, 2-tuple of strings which are concatenated forming an ad-hoc tree/rope. When an indexing operation is performed, it's flattened. SpiderMonkey also uses substring views to make mixing building and indexi ng operations less harsh. eg c = a + b, if the backing store for a is large enough to contain a + b, c inherits the backing store and a becomes a substring view into c. Considering we're aiming to replicate Pythonic slices this is probably something easy to get without too much complexity
+
+GC Policies:
+* Strings - one arena for all strings with a single lookup table. Hashes and GC data are stored in the lookup table, optimized for string equality and hash lookup. Uses a bump allocator, deletions can move the strings at will because they're referred by lookup
+* Sequences - Binary tree splitting the entire arena so realloc is almost always free. Always favor the largest contiguous block. Sequences aren't referred to directly, but rather by a corresponding primitive - each gets a reverse reference to its referer. As a result, these are very easy to relocate no matter how big they get. If more memory is needed, we can relocate based on how long ago it was used last (splay tree?) 
+* Primitive - Bump allocator + quipu to keep track of free blocks. Objects tend to be small and word-aligned
+
+The sequence policy is optimized for many small variable-length arrays or few larger arrays. If a larger size is requested than can be supported by an arena, we can either allocate another arena or "give up" and use plain malloc/realloc. Might also have a mechanism for "freezing" and "unfreezing" sequence types, which move them to/from the sequence pool. This could be implicit too, to free up sequence memory as needed
+https://www.youtube.com/watch?v=wd3PJHCrQ7k
+Type inference:
+* In methods we can automatically assume the type of `this` which short-circuits the slow prototype chain lookup path in favor of direct slot indexing. This isn't guaranteed, because methods are ordinary functions and can be called with foreign types, but it allows us to provide a specialized version
+  - Specialized bytecode has to be thrown away if the prototype is changed
+* Support TypeScript-like type annotations, functions are still defacto monomorphic. I keep flip-flopping on implementing this, but considering both Python and JS (via TypeScript) are going with type annotations, and the fact that it gives me anxiety imagining not having type information readily available when I want it to be available, it'd be dumb not to. Also even Python supports generics
+
+Don't use interfaces - they serve no runtime benefit and are implicitly handled by the code which calls them. If a type isn't known ahead of time (eg you would put in a "callable" interface), then nothing can be specialized ahead of time because property lookup happens regardless. Type hints are only useful if we know the EXACT type, because interfaces are implicit in prototype programming
+
+func::() returns a generic function
+func::(int) returns a function with the first parameter specialized on int, etc
+
+Example:
+
+function add(a: int, b: int) { return a + b; }
+add::()("string", 0.1) == "string0.1"
+
+Flags:
+* Here = unset if this is a forwarding pointer
+* Moved = This object was moved, don't move again until the forwarding pointer is freed (which unsets this bit)
+* Dirty = Dependents need to be checked
+* Unique = Know that there's only one reference to this (might be a micro-optimization)
+* Stack = Object only has stack references
+
+Types of handles:
+* LiveValue - Word-sized, actively used by the VM
+* HeapValue - 4-bytes, (maybe) compressed values within the heap
+* Var - LiveValue which has its address added to a GC root list
+
+32-bit, LiveValue = HeapValue because word-size = 32-bit and HeapValue uses absolute addresses
+64-bit, LiveValue is absolute while HeapValue uses object-relative addressing
+
+64-bit LiveValue has a lot more bits to work with, so we can store more values inline.
+* Can use NaN boxing to encode float
+* C string
+* Char
+* Smallstring
+
+It occurred to me what espresso is, in a sense - it's like a low-level language without typing, or rather, with late-binding of types and interfaces. All the types and structures are designed to have O(1) access once bindings are determined and emplaced via JIT. We're even looking at providing explicit support for struct types, which have static storage types which are verified dynamically
+
+For strings we do want to optimize for the short case - it would be very strange if we had hashes which were consistently larger than the strings they code for. Small strings can essentially act as their own hashes
+
+Ok for GC I keep thinking about premature optimizations and such, but in some cases it's justified - almost no GC objects are ever going to be more than a few hundred cells. For generality we can use 16-bit sizes, which fits nicely into the LuaJIT 3.0 GC model. For anything larger, at that point I would just start doing malloc because it isn't worth worrying about.
+
+Idea: If string interpolation is implicit, and bytes can just be a normal constructor, we can use backticks to represent raw (unescaped) strings and no longer have any flag parsing
+
+Idea 2: Have a special operator (";"?) which is called when a value appears at the top level of an expression (and isn't the result of an assignment)
+
+Primary semantic difference with strict mode is the any type is explicit, and no operator overloading
+
+This comes in conflict when we try to combine the two. Prototype languages purposefully eschew formal typing and the type hierarchy is dynamically generated. OOP-style ownership of methods for single dispatch thus makes sense. When you try to generalize to multimethods though, none of the parameters own the function. The behavior is entirely defined by their runtime type. Slate gets around this by inverting the ordinary relationship, where each prototype is given ownership of a "role" when the method is defined, eg "I can implement role 2 with these methods" and from this we can derive a set of applicable methods. This is a clever hack, but it inverts the intuitive conceptual model and spreads multimethod implementation across all objects, even if they don't specialize a method
+
+roles = [
+	{int: [method1, method2]},
+	{number: [method1], bool: [method2]}
+]
+
+roles[0][int] = {method1, method2}
+roles[1][float] = {}
+	float -> number
+roles[1][number] = {method1}
+intersect: {method1}
+
+(int, number) => method1()
+(int, bool) => method2()
+
+This is pretty good actually, the dispatch follows an O(n^2) sort of pattern. It leans more heavily on the left but makes the algorithm easy. Walk down the prototype chain until we find a match, then move to the next role, walk down the prototype chain, and if the intersection is empty return to the first role. Greedy left-biased first-fit. Also, matching prototypes is done via exact match
+
+Actually, we can make that roughly O(np) (n = arity, p = prototype depth) if we iterate the prototype chains all at once. If any of the roles match the type, lock that role to those methods and continuing iterating the prototype chains
+
+Iterate all the roles and find candidate matches for each layer . Then, do a set intersection and the result is the set of applicable methods. Finally we need a total ordering
+
+Conceptualization: (bedsheet dispatch?) Draping a blanket over an object. The blanket is the breadth-first check for exact values, if a point matches somewhere that has a higher precedence than any other matches. The first exact match (excluding the role) wins. This generates an ordered list of candidate methods because traversing the prototype chain will always be most to least specific
+
+To make this consistent with functions which ignore extra arguments, the formal parameters are followed by infinite any parameters. Because any is the least specific type in the type system, it adds no specificity information and can be ignored.
+
+roles = {[type]: method[]}[]
+
+function dispatch(roles, types) {
+	var candidates = [];
+	types = types[];
+	if(types.length > roles.length) types = types[:roles.length];
+	
+	loop {
+		if(types.all(. == any)) break;
+		
+		for(var i in ..roles) {
+			var r = roles[i], t = types[i];
+			if(t === any) continue;
+			
+			for(var method in r[t]) {
+				# The most specific method is found when all types are
+				#  satisfied
+				candidates.push((method, [false]*types.length))
+			}
+		}
+		
+		
+		for(var (method, satisfy) in candidates) {
+			for(var i in ..types) {
+				var t = types[i];
+				
+				if(method.signature[i] === t) {
+					satisfy[i] = true;
+					if(satisfy.all()) {
+						return method;
+					}
+				}
+			}
+		}
+		
+		# Iterate up the prototype chain by one (any => none)
+		for(var i in ..types) types[i] = types[i].proto;
+	}
+}
+
+Lexical multimethods seem to add too much magic. I like the idea of functions being fundamentally monomorphic, but the inner implementation dispatches based on type. Why do I want multimethods? For one, it gives a language-level feature for implementing specializations, which a dynamic JIT is bound to need. If we're already dispatching to different specializations, why not make that available to end-user code? The second issue is that operators are fundamentally polymorphic, and the typical solution (trying left.op then right.op) is adequate, but prone to fragility as it couples the data. Python's system gives builtin types a table of other types they have implementations for, then returns NotImplemented if they aren't an exact match. Then this defers to the right side, which is necessarily more specific than the left since we've ruled out that it's a known valid type
+
+So for instance, float + complex - float.__add__ fails because complex isn't in its table. Then, complex.__radd__ works and returns a complex number
+
+In a manner of speaking, espresso prototypes as -is are abstract types, separated from their instances (unlike eg JS where they're meant to be the same thing, objects). This isn't quite the same as Julia abstract types, though, which cannot be instantiated.
+
+I think I should include Julia's parametric types in espresso as syntax sugar - they're functionally identical to a higher-order function returning a dynamically created class (maybe with memoization), but a lot of edge cases have to be handled as well like implementing it as an array indexing, disabling setting, disabling function call as the parametric type is abstract, etc
+
+---
+
+After over a week of deliberation, making multimethods a language-level feature just adds too much complexity for too little value. The main concern for making it not language-level was how to implement operators, but they add complications of their own (eg up to O(n^2) complexity *per-operator* with no obvious way to cache methods without more type information than is expected) and even without multimethods I want operators to be special global functions implemented in the standard library - thus, amenable to multimethod-esque extension. As a language feature it's little more than syntax sugar, but this bakes its semantics into the language. Much better to use something like decorators instead.
+
+Also re-iterating the wisdom that inplace operators shouldn't be overloadable, but rather merely syntax sugar. Efficiency of in-place operation isn't worth nearly doubling the supported operators and adding some kind of pass-by-reference feature. Plus nearly the same performance can be achieved with copy-on-write
+
+Equal as a meta-operator (but not used to build eg == and !=, it still applies for those as "== =" etc)
+
+Still deliberating on macros and giving AST access to code - but I'm thinking to not support it because it's a very niche use for mostly esoteric semantic reasons which could potentially disable optimizations and make the language more complex
+
+use ref[T] which dereferences with val[], which can have semantics outside strict code - that is, a mutable reference value which can hold immutable values. It's also trivial to implement with operator overloading, as .set is the only operator overloads which work with assignment
+
+No fundamental way to distinguish x.y and x["y"]... Actually, what about identifiers being symbols rather than strings? Ala Ruby. But that causes issues with literal objects and quoting identifiers. Also our conception of symbols comes from JS, where they aren't actually coerced strings but rather unique objects with a descriptor. There isn't any good reason to *want* to distinguish the two syntaxes anyway I would think, except maybe to not have to dispatch different methods based on the type.
+
+Strict code has a number of special types not available outside strict code. i8, i32, etc and any, a type representing boxed values which must be explicitly unboxed, and the actual implementation of that is platform-dependent. We want to be careful what implicit operations we allow - type promotion is fine because it's roughly a no-op, but not int/float conversions or anything related to strings. The data model of objects should also be entirely explicit, which allows in-language implementation of a meta-object model with generic interfaces for JIT and GC.
+
+"as" operator reserved for strict code only (at least, it doesn't make sense to use it in non-strict code) - any kind of no-op type promotion, but mostly for unboxing any or union values.
+
+lhs bin / lhs rhs
+
+lhs bin: + - * / % ** // %% << <<< >> >>> ~ & | ^ ~~ && || ^^ != == !== === > >= < <= <> .. ::
+lhs: !
+lhs rhs: ++ --
+bin: ?? .? ->
+Special: . : ... @ ,
+
+We don't need to bother with letting operators be both lhs and bin if they can't be overloaded eg && || . -> , ! =
+
+Add ! and ? for rest identifiers to make it more lispy
+
+++ -- ** // %%
+<< >>
+&& || ?? :: ..
+
+<<< >>> ... ===
+
+the familiar of zero
+brave story
+now and then here and there
+combatants will be dispatched
+magical shopping arcade abenoboshi
+devil was a part timer (don't think I actually watched this)
+/u/PM_ME_U_ON_A_BOAT shadowperson investigator on reddit
+
+x <: y = x(y)
+x :> y = y(x)
+x -> y(...args) = y.call(x, ...args)
+Meta operators:
+!x x= ..x x.. \x⃝
+
+x \op y = :"\\"(op, x, y) 
+
+Base memory footprint:
+* Lua = 20 kB / 10 MB?
+* Python = 10 MB
+* V8 = 34 MB
+
+https://github.com/nicolasbrailo/cpp_exception_handling_abi
+
+none[x] = none
+bool(none) = false
+string(none) = "none"
+none(...) = no-op - note, it's a lot like JS void
+
+pure function qualifier?
+* All upvals are immutable
+* All global functions are pure
+* no references to "this"
+* incompatible with async and generators
+
+Parser design constraints:
+* ZIO: must be stateless, no feedback from later stages and no partial parsing
+* Lexer: Generates one token at a time, no lookahead, and no feedback from later stages (eg no regex syntax, which requires knowing the expected next token type). Stack depth is shallow and error conditions are handled by return
+* Parser: Generates an AST using a lispian data structure. Stack depth is deep and requires longjmp for error conditions. Memory is allocated on the AST which has a root node, so it can all be freed no matter how deep. Avoid large-scale AST optimizations, only local
+
+proto Shark is Animal {
+	public a, b, c; # Always available, instantiated as slots on instances
+	private d, e, f; # Like public, but referent must be this
+	static x, y; # Available on Shark
+	
+}
+
+Destructuring syntax implemented naively would have infinite lookahead, which is unacceptable for the language's design. A much better solution is to parse a destructuring expression as an object, keeping track of whether or not it's a valid lvalue, and deciding after the following token whether or not it's going to be used as one. A similar issue is encountered with arrow functions. If we parse it like JS, we don't need lookahead per-se, but we still need an intermediate structure which is converted at the end to either function parameters or a parenthesized tuple. However, if we use the same construction as destructuring this becomes similarly trivial - the only side effect is that it's more permissive than JS eg:
+* x, y => x + y
+* (x, y) => x + y
+* (((x, y))) => x + y
+* [x, y] => x + y
+* [x, ((y))] => x + y
+* {x, y} => x + y
+
+Actually - x, y => x + y would parse as x, (y => x + y) because ident followed by arrow is always an arrow function
+
+I think we only need two value classifications - lvalue and rvalue - which can be combined to demonstrate different conditions:
+* lv and rv = something like ident
+* !lv and rv = MUST be an rval, can't be promoted to lval for any reason
+* lv and !rv = MUST be an lval, can't be promoted to rval (eg object destructure with defaults, invalid as an rval)
+* !lv and !rv = invalid combination, nothing should ever be this
+
+Observation: Function declarations are almost never reassigned, and there's already an available sytnax for making a reassignable function (var x = function() {}). Having function declarations be const by default enables a lot of optimizations without costing anything. Basically, type information can propagate without having to account for the underlying function being replaced.
+
+Give var let semantics, let is more general than var and hoisting has limited usefulness. As a result, don't need "let" keyword
+
+objects are instances of a prototype. They have a fixed shape based on their prototype, but can be extended arbitrarily - at which point they are transparently extended ala Python's __dict__. The core assumption is that objects created using a prototype aren't expecting their shape to change, but we want to enable that
+
+new T(...args) = do => {
+	let $x = object.create(T);
+	return T::new($x, ...args) ?? $x;
+}
+
+V8's pipeline:
+* code -> AST -> bytecode -> peephole optimizations -> sea of nodes -> native
+* Big assumption seems to be that bytecode is slow, so effort spent optimizing it is mostly wasted (except peephole which is ~O(n))
+* Generated native code has assertions which "bail" to deoptimization
+
+function f(this, ...) {}
+* lets you pass "this" as the first argument rather than implicitly. That is, if the function is called without "this", the first argument is used instead.
+
+do {
+	xxx
+} while(cond) {
+	yyy
+}
+for(;;) {
+	xxx
+	if(!cond) break;
+	yyy
+}
+
+Prototype inheritance
+Tail call
+Await async promise
+Classes
+Operator overloading
+Static scoping
+Duck typing
+Low complexity
+Reduce keywords
+Copy on write using prototype chain
+Spread, rest, and deep destructuring
+JS object syntax
+Everything is an expression
+Function header parameter destructuring
