@@ -1,643 +1,551 @@
-strict struct Lex {
-	cur: u8;
-	line: u32;
-	btc: u32; # Bytes To Column = column for plain ASCII
+#! Test
+import re
+import iter
+
+const {join} = iter;
+
+const DEC = re`\d[\d_]*v`;
+# Token regex, organized to allow them to be indexed by name
+const PATS = {
+	"bin": `0b[_01]*[01]`,
+	"oct": `0o[_0-7]*[0-7]`,
+	"hex": `0x[_\da-fA-F]*[\da-fA-F]`,
+	"flt": `(?:\.\d[_\d]*|\d[_\d]*\.(?:\d[_\d]*)?)(?:e[-+]\d[_\d]*)?`,
+	"dec": `\d+`,
+	"sq": `'(?:\\.|.+?)*?'`,
+	"dq": `"(?:\\.|.+?)*?"`,
+	"bq": `\`(?:\\.|.+?)*?\``,
+	"sq3": `'''(?:\\.|.+?)*?'''`,
+	"dq3": `"""(?:\\.|.+?)*?"""`,
+	"bq3": `\`\`\`(?:\\.|.+?)*?\`\`\``,
+	"id": `[\w][\w\d]*`,
+	"op": [
+		`[()\[\]{}]`,
+		`[@~;,?]`,
+		`[-+*/%&|^:]{1,2}`,
+		`[<>]{1,3}`, `\.{1,3}`,
+		`<<[<>]|[<>]>>`,
+		`[!=]={1,2}`, `[<>]=?`
+	]->join("|")
+};
+# Operators which can't be overloaded because they encode syntax
+const SYNTACTIC = [
+	",", "=", "...", ".", ":", "&&", "||", "===", "!==", "++", "--"
+];
+const PRECS = {
+	",": 1,
+	"=": 2,
+	"..": 3, "...": 3,
+	"||": 3, "^^": 4, "&&": 5, "|": 6, "^": 7, "&": 8,
+	"==": 9, "!=": 9, "===": 9, "!==": 9,
+	"<": 10, "<=": 10, ">": 10, ">=": 10, "<>": 10,
+	"<<": 11, "<<<": 11, ">>": 11, ">>>": 11, "<<>": 11, "<>>": 11,
+	"!": 12, "~": 13, "+": 14, "-": 14,
+	"*": 15, "/": 15, "%": 15,
+	"**": 16, "//": 16, "%%": 16,
+	".": 17
+};
+
+# Right-associative operators
+const RIGHT = [
+	"**"
+];
+
+const KW = [
+	"if", "then", "else", "return", "while", "var", "function"
+];
+
+const RADIX = {
+	"bin": 2,
+	"oct": 8,
+	"dec": 10,
+	"hex": 16
+};
+
+const
+	NAMES = list(PATS.keys()),
+	TOKEN = re("\{PATS.values()->join(')|(')})", "m"),
+	COMMENT = re(`\s*(#\*(?:.|\n)+\*#\s*|#\{|#.*$)`, "m"),
+	RECURSIVE_COMMENT = re(`#\{|#\}`, "m"),
+	NEWLINE = re`\n`,
+	SPACE = re(`\s+`, "m"),
+	WORD = re`\S+`;
+
+proto Token {
+	public value, type, line, col, pos;
 	
-	lex_punc() {
-		var c = this.cur;
-		this.next();
+	new(value, type, line, col, pos) {
+		this := {value, type, line, col, pos};
+	}
+}
+
+proto Expr {}
+
+proto Const is Expr {
+	public value;
+	
+	new(value) {
+		this := {value};
+	}
+}
+
+proto Var is Expr {
+	public name;
+	
+	new(name) {
+		this := {name};
+	}
+}
+
+proto Sexp is Expr {
+	public elems;
+	
+	new(elems) {
+		this := {elems};
+	}
+}
+
+proto Tuple is Expr {
+	public elems;
+	
+	new(elems) {
+		this := {elems};
+	}
+}
+
+proto Assign is Expr {
+	public name, value;
+	
+	new(name, value) {
+		this := {name, value};
+	}
+}
+
+proto Func is Expr {
+	public name, args, body;
+	
+	new(name, args, body) {
+		this := {name, args, body};
+	}
+}
+
+proto Block is Expr {
+	public elems;
+	
+	new(elems) {
+		this := {elems};
+	}
+}
+
+proto Prog is Block {
+	
+}
+
+proto Lex {
+	public pos, line, col, src;
+	
+	new(src) {
+		this.pos = 0;
+		this.line = 1;
+		this.col = 1;
 		
-		switch(c) {
-			case '(' => TK_LPAREN; case ')' => TK_RPAREN;
-			case '[' => TK_LSQUARE; case ']' => TK_RSQUARE;
-			case '{' => TK_LCURLY; case '}' => TK_RCURLY;
+		this.src = src;
+	}
+	
+	error(msg) {
+		# Want to build a preview, extract the start of line
+		var sol = this.src.rfind('\n', this.pos)
+		if(sol is none) sol = 0;
+		
+		var left = this.pos - 60 # Prioritize before over after
+		if(left < 0) left = 0;
+		
+		# Cutoff at 80 chars or the end of the line
+		var pre = this.src[left:80].split('\n')[0];
+		# Point to the error
+		pre += "\n\{'-'*(this.pos - left)}^";
+		
+		# DEBUG
+		pre += "\n\{this.src[this.pos:]}";
+		
+		return new ParseError(msg, pre, this.pos, this.line, this.col);
+	}
+		
+	# Utility to use different regexes at the same index
+	match(reg) {
+		return reg.match(this.src, this.pos);
+	}
+	
+	# Adjust the parser position based on the token match
+	repos(m) {
+		this.pos += m[0].length;
+		var lines = NEWLINE.split(m[0])
+		if(lines.length > 1) {
+			this.line += lines.length - 1;
+			this.col = lines[-1].length;
+		}
+		else {
+			this.col += m[0].length;
+		}
+	}
+	
+	next() {
+		if(this.pos >= this.src.length) {
+			return none;
+		}
+		
+		var comment;
+		loop {
+			comment = this.match(COMMENT);
+		}
+		while(comment) {
+			this.repos(comment);
+			# TODO: Recursive comment parsing
+		}
+		
+		# Clean up ordinary space without comments
+		var m = this.match(SPACE);
+		if(m) this.repos(m);
+		
+		m = this.match(TOKEN)
+		if(m is none) {
+			m = this.match(WORD)
+			fail this.error("Unknown token " + m[0]);
+		}
+		
+		tok = m[m.lastgroup]
+		type = NAMES[m.lastgroup - 1]
+		
+		switch(type) {
+			case "id" => {
+				if(tok in KW) type = "kw";
+				val = tok;
+			}
+			case in RADIX => {
+				var r = RADIX[type];
+				if(r != 10) tok = tok[2:]
+				type = "const";
+				val = int(tok.replace("_", ""), r);
+			}
+			case "flt" => {
+				type = "const";
+				val = float(tok.replace("_", ""), r);
+			}
+			case "sq":
+			case "dq":
+			case "bq" => {
+				type = "const";
+				val = tok[1:-1]
+			}
 			
-			case ',' => TK_COMMA;
-			case ';' => TK_SEMICOLON;
-			case '~' => TK_TILDE;
-			case '*' => TK_STAR;
-			case '!' => TK_NOT;
+			case "sq3":
+			case "dq3":
+			case "bq3" => {
+				type = "const";
+				val = tok[3:-3]
+			}
 			
-			case '+' => if(this.maybe('+')) TK_INC else TK_PLUS;
-			case '-' =>
-				if(this.maybe('>')) TK_POINT;
-				else if(this.maybe('-')) TK_DEC else TK_MINUS;
+			case "op" => {
+				val = tok;
+			}
 			
-			case '/' => if(this.maybe('/')) TK_DIV2 else TK_DIV;
-			case '%' => if(this.maybe('%')) TK_MOD2 else TK_MOD;
-			case '^' => if(this.maybe('^')) TK_POW else TK_XOR;
-			case '&' => if(this.maybe('&')) TK_AND else TK_BIT_AND;
-			case '|' => if(this.maybe('|')) TK_OR else TK_BIT_OR;
-			case '?' => if(this.maybe('?')) TK_NULLISH else TK_QUESTION;
-			
-			case ':' =>
-				if(this.maybe(':')) TK_BIND;
-				else if(this.maybe('>')) TK_RBIND else TK_COLON;
-			
-			case '>' =>
-				if(this.maybe('>'))
-					if(this.maybe('>')) TK_ASH else TK_RSH;
-				else TK_GT;
-			
-			case '<' =>
-				if(this.maybe('<'))
-					if(this.maybe('<')) TK_LSH3 else TK_LSH;
-				else if(this.maybe(':')) TK_LBIND else TK_COLON;
-			case '=' =>
-				if(this.maybe('>')) TK_ARROW else TK_ASSIGN;
+			else: fail this.error("Unknown token " + tok);
+		}
+		
+		var {pos, line, col} = this;
+		return new Token(val, type, pos, line, col) finally this.repos(m);
 	}
 }
 
-struct AST {
-	op: BinOp;
-	children: array;
-}
-
-function lex_punc(this) {
-	x ..\xor y
-}
-
-/**
- * Hide the implementation of lexing and all the submethods
-**/
-struct LexImpl {
-	Lexer& L;
+proto Parser is Lex {
+	public cur, la, scope;
 	
-	int cur;
-	int line;
-	int btc; // Bytes to column, = column for plain ASCII
-	
-	//esp_Buffer buf;
-	
-	LexImpl(Lexer& lex): L(lex) {
-		line = 1;
-		btc = 0;
-		//esp_Buffer_init(&buf, 8);
+	new() {
+		super();
+		
+		this.cur = this.next();
+		this.la = none;
+		this.scope = [];
 	}
 	
-	void push(char d) { }//esp_Buffer_push(&buf, d); }
-	void clear() { }//esp_Buffer_clear(&buf); }
-	void save() { push(cur); }
+	consume() {
+		if(this.la) {
+			this.cur = this.la;
+			this.la = none;
+		}
+		else {
+			this.cur = this.next();
+			
+			if(this.cur.value in PRECS) {
+				this.la = this.next();
+				if(this.la.value == "=") {
+					this.cur.assign = true;
+					this.la = none;
+				}
+			}
+		}
+	}
 	
-	size_t offset(){ return L.z->offset(); }
-	uint8_t next() { return cur = L.z->getc(); }
-	bool eof() { return L.z->eof(); }
-	
-	uint8_t save_and_next() { save(); return next(); }
-	
-	int count_sequential(int qc);
-	
-	TokenType lex_punc();
-	void lex_name();
-	int64_t lex_int(char maxc);
-	int lex_hex(int nd);
-	
-	bool lex(Token& tok);
-	
-	bool maybe(uint8_t x) {
-		if(cur == x) {
-			next();
+	maybe(what) {
+		if(this.cur.value == what) {
+			this.consume();
 			return true;
 		}
 		return false;
 	}
-};
-
-bool Lexer::lex(Token& tok) {
-	return LexImpl(*this).lex(tok);
-}
-
-/**
- * Maps single character punctuators to their TokenType
-**/
-constexpr TokenType tt_lookup(char x, int add) {
-	#define TTL(c, name) case c => (TokenType)(TK_##name + add);
-	switch(x) {
-		TTL('.', DOT) TTL(',', COMMA) TTL('?', NULLISH)
-		TTL(':', COLON) TTL(';', SEMICOLON)
-		TTL('(', LPAREN) TTL(')', RPAREN)
-		TTL('[', LSQUARE) TTL(']', RSQUARE)
-		TTL('{', LCURLY) TTL('}', RCURLY)
-		TTL('+', PLUS) TTL('-', MINUS)
-		TTL('*', STAR) TTL('/', DIV) TTL('%', MOD)
-		TTL('~', BIT_NOT) TTL('^', BIT_XOR)
-		TTL('|', BIT_OR) TTL('&', BIT_AND)
-		TTL('<', LT) TTL('!', NOT) TTL('=', ASSIGN) TTL('>', GT)
-		default: assert(0);
-	}
-	#undef TTL
-}
-
-#define SOLO(x, name) case x[0] => TK_##name;
-#define SOLO_EQ(x, name) \
-	case x[0] => maybe('=')? TK_ASSIGN_##name : TK_##name;
-#define SOLO_EQ_OR_DUO(x, solo, duo) \
-	case x[0]: if(maybe('=')) return TK_ASSIGN_##solo; \
-		return maybe(x[0])? TK_##duo : TK_##solo;
-#define SOLO_AND_DUO_EQ(x, solo, duo) \
-	case x[0] => maybe(x[0])? \
-		maybe('=')? TK_ASSIGN_##duo : TK_##duo \
-		: maybe('=')? TK_ASSIGN_##solo : TK_##solo;
-
-/**
- * Lex punctuation, both syntactic and operators written as an ad-hoc prefix
- *  tree in code, returning the token code of the operator.
- * 
- * All operators have single and double versions
- * Inplace operators are implemented as the application of an assignment
- *  meta-operator =, which is treated as a separate token.
- * &&&
- * :::
- * ***
-**/
-TokenType LexImpl::lex_punc() {
-	int c = cur;
-	next();
 	
-	switch(c) {
-		SOLO(",", COMMA) SOLO(";", SEMICOLON) SOLO("~", BIT_NOT)
-		SOLO("(", LPAREN) SOLO(")", RPAREN)
-		SOLO("[", LSQUARE) SOLO("]", RSQUARE)
-		SOLO("{", LCURLY) SOLO("}", RCURLY)
-		SOLO_EQ_OR_DUO("+", PLUS, INC)
-		SOLO_EQ("*", STAR) SOLO_EQ("%", MOD)
-		SOLO_EQ_OR_DUO("/", DIV, IDIV)
-		SOLO_EQ_OR_DUO("^", BIT_XOR, EXP)
-		SOLO_EQ_OR_DUO("&", BIT_AND, AND)
-		SOLO_EQ_OR_DUO("|", BIT_OR, OR)
-		
-		case '.': // . .. ... .?
-			return maybe('.')?
-				maybe('.')? TK_ELLIPSIS : TK_RANGE
-				: maybe('?')? TK_HAS : TK_DOT;
-		
-		case '?': // ? ?= ?? ??=
-			return maybe('?')?
-				maybe('=')? TK_ASSIGN_NULLISH : TK_NULLISH
-				: maybe('=')? TK_ASSIGN_QUESTION : TK_QUESTION;
-		
-		case '-': // - -= -- ->
-			if(maybe('=')) return TK_ASSIGN_MINUS;
-			if(maybe('>')) return TK_POINT;
-			return maybe('-')? TK_DEC : TK_MINUS;
-		
-		case ':': // := :: :> :
-			if(maybe('=')) return TK_ASSIGN_COLON;
-			if(maybe(':')) return TK_BIND;
-			return maybe('>')? TK_RBIND : TK_COLON;
-		
-		case '>': // > >> >= >>= >>> >>>=
-			return maybe('>')?
-				maybe('>')?
-					maybe('=')? TK_ASSIGN_ASH : TK_ASH
-					: maybe('=')? TK_ASSIGN_RSH : TK_RSH
-				: maybe('=')? TK_GE : TK_GT;
-		case '<': // < << <= <=> <<= <:
-			if(maybe('<')) return maybe('=')? TK_ASSIGN_LSH : TK_LSH;
-			if(maybe(':')) return TK_LBIND;
-			return maybe('=')?
-				maybe('>')? TK_CMP : TK_LE
-				: maybe(':')? TK_LBIND : TK_LT;
-		case '!':
-			return maybe('=')? maybe('=')? TK_ID_NE : TK_NE : TK_NOT;
-		case '=': // = == === =>
-			return maybe('=')? maybe('=')? TK_ID_EQ : TK_EQ : TK_ARROW;
-		
-		default => TK_ERROR;
-	}
-}
-
-// Callback for bsearch
-int bsearch_strncmp(const void* k, const void* a) {
-	auto* key = (esp_Buffer*)k;
-	return strncmp((const char*)key->data, (const char*)a, key->size);
-}
-
-bool isIdentStart(char x) {
-	return isalpha(x) || x == '_' || x == ESPZ_STARTER;
-}
-
-bool isIdentRest(char x) {
-	return isalnum(x) || x == '_' || x >= ESPZ_STARTER;
-}
-
-/**
- * Lex a "name" (generic term for identifiers and keywords) - actual token
- *  creation is handled by the caller
-**/
-void LexImpl::lex_name() {
-	assert(isIdentStart(cur));
-	
-	// 0x7F is specially treated to enable ZIO readers make a distinction
-	//  between start and rest unicode characters.
-	if(cur != ESPZ_STARTER) save();
-	
-	int c;
-	while(isIdentRest(c = next())) {
-		if(c != ESPZ_STARTER) save();
-	}
-}
-
-/**
- * General-purpose int parser for bases using decimal digits (binary,
- *  octal, and decimal). Also useful for repeated invocations in
- *  float literal parsing, which could have up to 3 calls: integer
- *  part, fractional part, and exponent.
-**/
-int64_t LexImpl::lex_int(char maxc) {
-	int64_t i = 0;
-	int c = cur;
-	
-	assert(isdigit(c));
-	
-	do {
-		i *= maxc - '0';
-		i += c - '0';
-		
-		do {
-			c = next();
-		} while(c == '_');
-	// Generic isdigit using the maximum digit
-	} while(c >= '0' || c <= maxc);
-	
-	return i;
-}
-
-/**
- * Count how many times the current character is repeated, up to a
- *  given parameter. Used for triple quoting. Stream is advanced to the
- *  next char after the quotes
-**/
-int LexImpl::count_sequential(int upto) {
-	int q = cur, i = 1;
-	
-	while(next() == q && ++i < upto) {}
-	
-	return i;
-}
-
-#define ERROR(msg) do { L.error = msg; goto error; } while(0);
-
-#define ESCAPE(x, e) case x: c = e; break
-#define COMMON_ESC(eof) \
-	ESCAPE('0', '\0'); \
-	ESCAPE('t', '\t'); \
-	ESCAPE('n', '\n'); ESCAPE('r', '\r'); \
-	case '\'': case '"': case '`': case '\\': case '\n': break; \
-	case ESPZ_EOF: ERROR("EOF while lexing " eof); \
-	default: push('\\'); break
-
-int hexval(int x) {
-	assert(isxdigit(x));
-	// lo4('0') = 0
-	// lo4('a' or 'A') = 1
-	// =lo4(x) + 9*isAlpha(x)
-	return (x&0xF) + 9*(x>>6);
-}
-
-int LexImpl::lex_hex(int nd) {
-	int i = 0, c;
-	do {
-		if(!isxdigit(c = next())) {
-			ERROR("Invalid hex escape sequence");
+	expect(what) {
+		if(!this.maybe(what)) {
+			fail this.expected(what);
 		}
-		
-		i = i<<4 | hexval(c);
-	} while(--nd);
-
-error:
-	return i;
-}
-
-/**
- * Generic lexing iterator, returns whether or not a token was read (false
- *  on error). The output token will be changed regardless of the return.
- * 
- * @param lex The lexer to iterate
- * @param tok The output token, it will be mangled even if the lexer
- *  fails to lex a token.
-**/
-bool LexImpl::lex(Token& tok) {
-	uint64_t ip;
-	int off = offset(), c, q, qc;
-	
-	// Skip all space characters, keeping track of newline and column
-	while(cur <= ' ') {
-		next();
-		CHECK_NEWLINE();
 	}
 	
-	btc += offset() - off;
+	expectType(type) {
+		if(this.cur.type != type) {
+			fail this.expected(type);
+		}
+	}
 	
+	expected(what) = this.error("Expected " + what);
 	
+	addVar(v) = this.scope[-1].push(v);
 	
-	tok.line = line;
-	tok.btc = btc;
+	lvalue() {
+		var x = this.atom();
+		if(x.lvalue) return x;
+		
+		fail this.error("Not an l-value");
+	}
 	
-	switch(cur) {
-		// Comments
-		case '#':
-			clear();
+	atom() {
+		if(this.cur is none) return none;
+		
+		# Exceptions which shouldn't be consumed
+		var
+			cur = this.cur,
+			val = cur.value,
+			ct = cur.type
+		
+		if(val in set(")", ";", "}") return none;
+		
+		this.consume()
+		
+		return switch(ct) {
+			case "const" => new Const(val);
 			
-			if(next() == '*') {
-				tok.flags.reset();
-				tok.flags[TF_MLINE] = true;
-				do {
-					if(next() == '*') {
-						if(next() == '#') break;
-						push('*');
+			case "id" => new Var(val);
+			
+			case "op" => {
+				if(val == "(") {
+					if(this.maybe(")") {
+						return new Tuple();
 					}
-					save();
-					CHECK_NEWLINE();
-				// EOF in comments is fine
-				} while(cur != ESPZ_EOF);
-			}
-			else if(cur == '{') {
-				int level = 1;
-				do {
-					if(maybe('}')) {
-						if(maybe('#')) --level;
-						push('}');
+					
+					with(this.stack.push([])) {
+						return
+							semiAsExpr([...this.semichain()])
+							finally this.expect(")");
 					}
-					else if(maybe('#')) {
-						if(maybe('{')) ++level;
-						push('#');
-					}
-					save();
-					CHECK_NEWLINE();
-				} while(level && cur != ESPZ_EOF);
-			}
-			else {
-				while(cur != ESPZ_EOF && cur != '\n') {
-					save_and_next();
+				}
+				# else if(val == ")") {}
+				# else if(val == "}") {}
+				else {
+					return new Sexp(val, new Const(none), this.atom());
 				}
 			}
 			
-			btc += offset() - off;
-			
-			tok.type = TK_COMMENT;
-			tok.str = esp_Buffer_decode_utf8(&buf);
-			
-			// Comments have a known stop char, so we need to skip
-			if(cur != ESPZ_EOF) next();
-			
-			goto maybe_nl;
-		
-		// Real, dot, range, or ellipses
-		case '.':
-			if(isdigit(c = next())) {
-				goto dot;
-			}
-			else if(maybe('.')) {
-				tok.type = maybe('.')? TK_ELLIPSIS : TK_RANGE;
-			}
-			else {
-				tok.type = TK_DOT;
-			}
-			goto no_nl;
-		
-		// 0b???, 0o???, 0???, 0.???, or 0x???
-		case '0':
-			tok.type = TK_INT;
-			
-			// Special base prefixes
-			switch(next()) {
-				case 'b':
-					tok.ival = lex_int('1');
-					break;
-				
-				case 'o': // Octal MUST be explicit
-					tok.ival = lex_int('7');
-					break;
-				
-				// Obsolete 0-prefixed octal generates no warnings
-				case '0'...'9': goto decimal;
-				case '.': goto dot;
-				
-				/* TODO: No check for overflow or type promotion */
-				case 'x':
-					ip = 0;
-					while(isxdigit(c = next())) {
-						ip = ip<<4 | hexval(c);
-						while(c == '_') c = next();
-					}
+			case "kw" => switch(val) {
+				case "if" => {
+					var cond = this.expr();
+					this.maybe("then");
 					
-					tok.ival = ip;
-					break;
-			}
-			goto no_nl;
-		
-		// Decimal int or real
-		case '1' ... '9':
-		decimal:
-			ip = lex_int('9');
-			
-			// Real confirmed, label is for .??? from above
-			if(cur == '.') {
-			dot:
-				uint64_t fp = lex_int('9');
-				int digits = offset() - off, ex = 0;
-				
-				c = cur;
-				if(c == 'e' || c == 'E') {
-					c = next();
+					var th = this.block();
+					var el =
+						if(this.maybe("else")) new Const(none);						else this.block();
 					
-					if(c == '-' || c == '+') {
-						next();
-					}
-					
-					ex = lex_int('9');
-					if(c == '-') ex = -ex;
+					return new Sexp("if", cond, th, el);
 				}
 				
-				// Avoid multiplying the pows together which could lose
-				//  precision - instead, they're scaled then added which
-				//  won't lose precision
-				tok.rval = fp*pow(10, ex - digits) + ip*pow(10, ex);
-				tok.type = TK_REAL;
-			}
-			goto no_nl;
-		
-		case '$':
-			tok.flags = 0;
-			for(;;) {
-				switch(next()) {
-					case 'r': tok.flags[TF_RAW] = true; break;
-					case 'b': tok.flags[TF_BYTES] = true; break;
-					case 'f': tok.flags[TF_FORMAT] = true; break;
+				#*
+				 * Else cannot appear on its own, but it isn't an error to
+				 *  encounter it while parsing an atom - this can happen
+				 *  while parsing the then block.
+				 *#
+				case "else" => none;
+				
+				case "while" => {
+					var cond = this.expr();
+					var bl = this.block();
+					var th = new Const(none);
+					var el = new Const(none);
 					
-					case '\'': case '"': case '`':
-						tok.type = TK_STRING;
-						goto lex_string;
-					
-					default: ERROR("Invalid string literal prefix");
+					return new Sexp("while", cond, bl, th, el);
 				}
-			}
-		
-		// Normal string (no qualifiers)
-		case '\'': case '"': case '`':
-			tok.flags = 0;
-		
-		lex_string:
-			clear();
-			
-			q = cur;
-			qc = count_sequential(3);
-			btc += qc;
-			
-			// Empty string
-			if(qc == 2) goto maybe_nl;
-			
-			do {
-				c = save_and_next();
-				if(c == '\\') {
-					if(tok.flags[TF_RAW]) {
-						// Raw strings keep backslashes, but we still need to
-						//  handle escaping the quote character
-						if(save_and_next() == ESPZ_EOF) {
-							ERROR("EOF while lexing string");
-						}
-						c = next();
-					}
-					else if(tok.flags[TF_BYTES]) {
-						/**
-						 * Handle escape sequences for byte literals
-						 *  (unicode escapes not supported, and hex escapes
-						 *  produce that byte value instead of that
-						 *  codepoint).
-						**/
-						switch(c = next()) {
-							COMMON_ESC("bytes");
+				
+				#* 
+				 * Var declarations are split into two separate concerns,
+				 *  variable name hoisting to the innermost enclosing
+				 *  scope and assignment of the variable at the correct
+				 *  point (by returning assignments as a group of
+				 *  assignment s-exprs)
+				 *#
+				case "var" => {
+					var group = [];
+					loop {
+						this.expectType("id");
+						var name = this.cur.value;
+						this.consume();
+						
+						this.addVar(name);
+						
+						if(this.maybe("=")) {
+							var x = this.expr();
+							if(x is none) {
+								fail this.expected("expression");
+							}
 							
-							// Hex encodes bytes instead of codepoints
-							case 'x':
-								c = lex_hex(2);
-								if(L.error) ERROR(L.error);
-								break;
+							group.push(new Assign(Var(name), x));
 						}
+					} while(this.maybe(","));
+					
+					return semiAsExpr(group);
+				}
+				
+				case "function" => {
+					var name = none;
+					if(this.cur.type == "id") {
+						name = this.cur.value;
+						this.consume();
+					}
+					
+					var args = this.lvalue();
+					args = if(args is Tuple) args.elems else [args];
+					
+					var block = this.block();
+					var func = new Func(name, args, block);
+					
+					if(name) {
+						this.addVar(name);
+						return new Assign(Var(name), func);
+					}
+					else func;
+				}
+				
+				case "try" => fail new NotImplementedError("try");
+				
+				else => fail this.error("Unimplemented keyword " + val);
+			}
+			
+			else => fail this.error("Unknown token " + val);
+		}
+	}
+	
+	#**
+	 * Parses a "block", which is an expression which prioritizes curly-brace
+	 *  blocks over object literals and considers the semicolon to end the
+	 *  expression rather than continue it.
+	**#
+	block() {
+		if(this.maybe("{")) {
+			with(var v = this.scope.push([])) {
+				var b = list(this.semichain());
+				this.expect("}");
+				
+				if(v) semiAsExpr(b) else new Block(b, v);
+			}
+		}
+		else {
+			this.expr() finally this.maybe(";");
+		}
+	}
+	
+	binop() {
+		var op = this.cur.value;
+		if(op not in PRECS) return none, none;
+		
+		this.consume();
+		
+		return op, this.maybe("=");
+	}
+	
+	#**
+	 * Uses precedence climbing
+	**#
+	expr_impl(min_prec) {
+		var lhs = this.atom();
+		
+		while(this.cur is not none) {
+			var op = this.cur.value;
+			
+			switch(op) {
+				case "(" => {
+					lhs = new Call(lhs, list(
+						loop {
+							this.expr_impl(PRECS[','] + 1);
+						} while(this.maybe(","))
+					));
+				}
+				
+				case "[" => {
+					lhs = new Get(lhs, list(
+						loop {
+							this.expr_impl(PRECS[":"] + 1)
+						} while(this.maybe(":"))
+					))
+				}
+			}
+			then continue;
+			
+			if(op not in PRECS) break;
+			
+			var assign = this.cur.assign;
+			var prec = PRECS[if(assign) "=" else op];
+			
+			if(prec < min_prec) break;
+			
+			var next_min_prec = prec + (op in RIGHT);
+			this.consume();
+			
+			rhs = this.expr_impl(next_min_prec);
+			
+			if(assign) {
+				lhs = new Assign(op, lhs, rhs);
+			}
+			else {
+				if(op == ",") {
+					if(lhs is Tuple) {
+						lhs.push(rhs);
 					}
 					else {
-						/**
-						 * Handle escape sequences for normal strings,
-						 *  including unicode escapes. Returns true on error.
-						**/
-						switch(c = next()) {
-							COMMON_ESC("string");
-							
-							case 'U':
-								c = lex_hex(8);
-								goto unicode_esc;
-							case 'u':
-								c = lex_hex(4);
-								goto unicode_esc;
-							case 'x':
-								c = lex_hex(2);
-								goto unicode_esc;
-							
-							unicode_esc:
-								// Build UTF-8
-								if(c > 0x7F) {
-									if(c <= 0x07FF) {
-										// 2-byte unicode
-										push((c>>6)&0x1F | 0xc);	
-									}
-									else {
-										if(c <= 0xFFFF) {
-											// 3-byte unicode
-											push((c>>12)&0x0F | 0xE0);
-										}
-										else if(c <= 0x10FFFF) {
-											// 4-byte unicode
-											push((c>>18)&0x07 | 0xF0);
-											push((c>>12)&0x3F | 0x80);
-										}
-										else {
-											ERROR("Codepoint out of range");
-										}
-										
-										push((c>>6)&0x3F | 0x80);
-									}
-									
-									c = c&0x3F | 0x80;
-								}
-								break;
-						}
+						lhs = new Tuple(lhs, rhs);
 					}
-					
-					// Push the last byte of whatever the escape represents
-					push(c);
 				}
-				
-				CHECK_NEWLINE();
-				
-				if(cur == q && count_sequential(qc) == qc) {
-					break;
+				else {
+					lhs = new Sexp(op, lhs, rhs);
 				}
-			} while(cur != ESPZ_EOF);
-			
-			if(cur == ESPZ_EOF) {
-				ERROR("EOF while lexing string literal");
 			}
-			
-			btc += offset() - off;
-			tok.type = TK_STRING;
-			goto maybe_nl;
-		
-		// All keywords use lowercase
-		case 'a' ... 'z': {
-			clear();
-			lex_name();
-			
-			void* x = bsearch(
-				&buf, token_names,
-				NUM_KEYWORDS(), sizeof(char*),
-				&bsearch_strncmp
-			);
-			
-			if(x) {
-				tok.type = (TokenType)((const char**)x - token_names);
-			}
-			else {
-				tok.type = TK_IDENT;
-			}
-			goto no_nl;
 		}
 		
-		// Keywords are always lowercase ASCII, so if it starts with these
-		//  then we don't have to check if it's a keyword
-		case 'A' ... 'Z':
-		case '_': case ESPZ_STARTER:
-			lex_name();
-			goto no_nl;
-		
-		case ESPZ_INVALID:
-			ERROR("Invalid unicode codepoint");
-		
-		// Anything else is an operator, difficult to inline because of
-		//  the complex control flow simplified by returns.
-		default:
-			tok.type = lex_punc();
-			goto no_nl;
+		return lhs;
 	}
 	
-	// Tokens which can't contain newlines don't handle column
-	//  incrementing, so we need to do it externally here.
-no_nl:
-	btc += offset() - off;
+	expr() = this.expr_impl(0);
 	
-	// Column incrementing has been taken care of
-maybe_nl:
-	return true;
-
-error:
-	tok.type = TK_ERROR;
-	return false;
-}
-
-const char* Token::c_str() const {
-	return token_name(type);
-}
-
-const char* Token::token_name(TokenType tt) {
-	return (tt < _TK_COUNT)? token_names[tt] : "INVALID";
+	#**
+	 * Parse a block as a chain of expressions possibly separated by
+	 *  semicolons
+	**#
+	yield semichain() {
+		while(this.cur is not none) {
+			yield this.expr() ?? break;
+			
+			while(this.maybe(";")) {}
+		}
+	}
+	
+	parse() {
+		with(var v = this.scope.push([])) {
+			return Prog([...this.semichain()], v);
+		}
+	}
 }

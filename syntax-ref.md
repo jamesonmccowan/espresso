@@ -7,6 +7,19 @@ General philosophy is to reuse everything as much as possible, get as much milea
 
 Take for instance the prototype declaration syntax which is inspired by JS classes: `proto Child is Parent {}` reuses two keywords where other languages usually introduce two new ones. This also adds a layer of synchronicity, where `Child is Parent` as well as instances of Child is a boolean operation returning true (working much like JS `instanceof`)
 
+Espresso is a dynamic language, but it tries to follow the C++ zero-overhead principle as closely as is possible for a scripting language, a "minimal-overhead principle". Some features are inherent in the execution model, such as dynamic typing, but have ways to opt out (eg strict mode). Espresso has static-by-default lexical scoping which means variable names are unnecessary for lookup and only saved as debug data. Exceptions are C++-like, almost zero overhead for non-throwing code but very expensive for throwing code.
+
+* Reuse everything as much as possible (keywords, features, syntax)
+* Small core, build up with libraries
+* Zero cost interfacing with native code
+* Embeddability
+* Generalization - especially when doing so simplifies logic
+* Small code size/memory usage
+* Ultimate goal of self-bootstrapping
+* Exceptions are exceptional, not alternate control flow
+* Stateless tokenization
+* LR(1) syntax
+
 ### Design constraints
 Espresso is a multi-paradigm language implemented on top of a protype system
 * Language is ASCII, but UTF-8 friendly. A simple hack lets the lexer communicate character information with minimal logic and no state
@@ -73,6 +86,10 @@ Duplicate key names are illegal. If a computed property results in an existing k
 		finally {
 			this.__exit__();
 		}
+		
+		this.__enter__();
+		try return yield;
+		finally this.__exit__();
 	}
 	
 	+(lhs, rhs) {
@@ -80,7 +97,7 @@ Duplicate key names are illegal. If a computed property results in an existing k
 		#* unary + sets lhs = none and rhs = this *#
 	},
 	
-	<=>(lhs, rhs) { #* Overload for comparison ops *# },
+	\<>(lhs, rhs) { #* Overload for comparison ops *# },
 	>() { #* Overrides the default provided by <=> *# },
 	===() { #* ERROR, can't overload id equality *# },
 	
@@ -195,6 +212,11 @@ new {
 
 As a logical consequence, `arr[]` calls the getter with no arguments.
 
+An alternate syntax with equivalent semantics is:
+```js
+x.(1, 2, 3) == x[1:2:3]
+```
+
 ### Tail-call recursion
 PTC is tentatively supported because it feels bad to keep extra stack frames around when they're effectively only good for stack traces, which are exceptional. To prevent confusion, the calling convention distinguishes tail calls with some kind of flag so the elided frames can be replaced with something like "..."
 
@@ -216,8 +238,6 @@ Note the preceeding ellipses, which are *not* a specialized syntax for this.
 Rather, it represents a spread operator being applied to an iterable.
 
 One consequence of this principle is that the semicolon works like how many C-like languages treat the comma operator; it evaluates the operands in order and returns the last element. For instance, `(1;2;3) == 3`. Control flow keywords execute as expected when they are evaluated, which may lead to some very nice idiomatic code: `x and return x` will only return x if it's truthy, or `isValid(x) or throw` which is comparable to the PHP idiom "x or die()".
-
-As an edge case, semicolons within parentheses delineate *expressions*, not statements as they would in a block.
 
 ## Namespaces
 Two types of top-level namespaces are recognized: closed and open. Modules almost always have a closed namespace, which means the set of valid identifiers is known at parse time and no new ones can be added. The object returned by import is built from exported objects, not the top level namespace, so modifying the module object won't modify its namespace. An open namespace is used primarily for REPL interfaces. In these namespaces, identifiers can be added and even removed as needed (using delete, which normally won't work). Other features which are normally forbidden (global object, global := import "module", etc) are enabled.
@@ -295,7 +315,7 @@ Note that this is the same as the while code above, just with the "always" block
 A do block takes the place of the JS idiom IIFE (immediately invoked function expression). It enables a complex algorithm with scoping to be used in place of an expression. A do block acts as if its body is a function called with no arguments. `this` is lexically bound.
 
 ### Exception handling
-Exceptions are considered *exceptional* and represent a state which wasn't expected to occur. Catching errors are normally untyped, but the error object can be recovered using `throw.error`. The full try statement expression is:
+Exceptions are considered *exceptional* and represent a state which wasn't expected to occur. Ordinarily errors aren't caught as much as they are accounted for. The thrown object can be recovered using `throw.error` and the stack is in `throw.stack`. The full try statement expression is:
 
 ```
 try {
@@ -314,6 +334,13 @@ finally {
 
 ### Namespace
 The `namespace` keyword returns an open namespace initialized using the provided block. As a statement, it's declared as a const variable using its mandatory name. As an expression, the name is optional (for debug).
+
+Dynamic namespaces are created by enclosing the object in parentheses, like:
+```js
+namespace name(obj) {}
+```
+
+This has the same semantics as JS ```with``` and exists solely as a way to replicate REPL dynamic namespaces, since lexical scoping is otherwise static.
 
 ## Protocols
 This section describes the various language protocols
@@ -372,6 +399,35 @@ proto {
 	}
 }
 ```
+
+### Finally
+The `finally` keyword is a pretty exotic addition. In effect, it's a reversal of the `;` operator. The first value is the result, and the second value is evaluated afterwards, but its value is ignored. This was implemented to accomodate a common programming pattern:
+
+```js
+var tmp = this.doThing();
+this.doAnotherThing();
+return tmp;
+```
+
+which can be replaced with:
+
+```js
+return this.doThing() then this.doAnotherThing();
+return this.doThing() finally this.doAnotherThing();
+```
+
+This is also a generalization of the `try`-`finally` construct present in many C++ descendents. Where that is ordinarily a fairly rarely used keyword with only one contextual use-case, this has broad generic meaning w hich is valid in both contexts. Thus
+
+```js
+try x finally y
+```
+
+is actually *parsed* as
+
+```js
+(try x) finally y
+```
+This is somewhat in conflict with its usage as the `then` block which all control flow expressions support, but it's expected that this ambiguity won't show up in the vast majority of cases. Lexically this is unambiguous, `then` blocks always take priority and you can always wrap the expression in parentheses to use a `then` expression.
 
 ## Type hierarchy
 never (type of a function which never returns)
@@ -452,6 +508,12 @@ x => lambda
 immediate(x, y) = _function(y, x)
 ```
 
+### Numbers
+Numbers are split between two types, int and float. Integers can be specified in base 2 with the prefix 0b, base 8 with the prefix 0o, base 16 with the prefix 0x, and all other numbers are base 10. Floats can be specified in base 10 with an optional exponent suffix, or base 16 with exponent expressed with p eg 0x123.456p-3. Both ints and floats can have their digits separated by an underscore. Numbers can also be suffixed by an identifier (with no spaces in between) which indicates a function to be called, eg 2px.
+
+### Strings
+Strings can use single quotes, double quotes, or backticks with the same semantics. They all also have a triple quoted form. Raw strings (which don't process escapes other than \\ and their quote type) are indicated by a \ prefix. All strings are format strings by default, with string interpolation being indicated by \{...}. String interpolation doesn't support nesting quotations to avoid excessive complexity in the tokenizer, so strings within the braces must use a different quote type from the surroundings. Comments are not supported. Strings can also be suffixed by an identifier which is a function to be called on it (taking priority over prefix functions)
+
 ## Inspirations
 Quick list of languages researched for feature integration:
 * JavaScript
@@ -493,6 +555,8 @@ Quick list of languages researched for feature integration:
   - Register bytecode for addressing virtual stack-allocated variables
   - Upvalues
   - Operator overload functions not having an explicit reversed function (ala Python's `__radd__`)
+  - 1-based indexing is a bad idea
+  - "Everything is a table" is a nice idea, but Lua has been slowly backtracking because it actually increases complexity and decreases performance because you effectively have to reimplement type checking
 * Julia
   - Number suffixes are normal function calls (previously considered having a special namespace but Julia just uses eg 1im which is much more elegant and still easy to read)
   - String prefixes are syntax sugar for macro calls, let's use that for both string prefixes and number suffixes - wait, this would make spaces semantic, or else disable unparenthesized string function calls. Not a huge loss, the usage in Lua is unclear
@@ -500,6 +564,7 @@ Quick list of languages researched for feature integration:
   - Strings are always formatted implicitly
   - Colon prefix to make symbols (also used in Ruby) and lispian quoting of expressions with interpolation (might use \ instead actually)
   - @ macros (composes well with the decorator syntax)
+  - Implicit return of last value
 * Dart (concurrency model, JS concept streamlining)
 * Scala (operators as valid contextual identifiers)
 * Java (public/private/static)

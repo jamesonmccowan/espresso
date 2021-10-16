@@ -1,0 +1,1 @@
+I tend to reimplement projects over and over again in different languages. Old implementations which aren't being used currently are put in this `old` directory to reduce clutter in the root directory.

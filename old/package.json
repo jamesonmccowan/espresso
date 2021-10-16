@@ -1,0 +1,23 @@
+{
+	"contributes": {
+		"languages": [
+			{
+				"id": "espresso",
+				"extensions": [
+					".esp"
+				],
+				"firstLine": "^#!/.*\\bespresso\\b"
+			}
+		],
+		"grammars": [
+			{
+				"language": "espresso",
+				"scopeName": "source.espresso",
+				"path": "./espresso.tmGrammar.json"
+			}
+		]
+	},
+	"devDependencies": {
+		"@types/node": "^16.9.1"
+	}
+}
