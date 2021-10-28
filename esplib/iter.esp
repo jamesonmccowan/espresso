@@ -1,0 +1,51 @@
+export function join(this, separator=", "): string {
+	var it = this.iter();
+	var str = string(it.next());
+	if(str === StopIteration) {
+		return "";
+	}
+	for(var x in it) {
+		str += separator;
+		str += x;
+	}
+	
+	return str;
+}
+
+export function yield filter(this, predicate) {
+	for(var x in this) {
+		if(predicate(x)) yield x;
+	}
+}
+
+export function reduce(this, combinator, initial=none) {
+	var acc = initial;
+	for(var x in this) {
+		acc = combinator(acc, x);
+	}
+	return acc;
+}
+
+export function yield map(this, transform) {
+	for(var x in this) {
+		yield transform(x);
+	}
+}
+
+export function any(this, predicate): bool {
+	for(var x in this) {
+		if(predicate(x)) return true;
+	}
+	return false;
+}
+
+export function every(this, predicate): bool {
+	for(var x in this) {
+		if(!predicate(x)) return false;
+	}
+	return true;
+}
+
+return function iter(this) {
+	return this.iter();
+}

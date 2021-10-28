@@ -7,7 +7,13 @@ if len(sys.argv) == 1:
 	print("Call with a program")
 	exit()
 
-src = sys.argv[1]
+if sys.argv[1] == "-c":
+	if len(sys.argv) == 2:
+		print("Need a string")
+		exit()
+	src = sys.argv[2]
+else:
+	src = open(sys.argv[1]).read()
 
 def tokstream(src):
 	p = parse.Lexer(src)
@@ -20,7 +26,7 @@ def tokstream(src):
 
 pprint.pp(list(tokstream(src)))
 
-prog = parse.Parser(sys.argv[1]).parse()
+prog = parse.Parser(src).parse()
 
 print(prog)
 pprint.pp(prog)

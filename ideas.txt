@@ -10,147 +10,14 @@ Because we have this restricted subset, the compiler can be written in strict co
 
 We ought to make an IR targeted for espresso which supports both the high and low levels. This should decouple assemblers/JIT/interpreters from the parsing stage
 
-+ - * / % %% //
-<< <<< >> >>> ~ & | ^
-! && || bool
-< <= > >= != == <> === !==
-none false true ninf pinf nan ld0 ld1 int float str object list
-invoke index lookup closure
-
-15 registers + accumulator + arbitrary variable slots
-
-Most instructions are 3 address codes: out = op(in1, in2)
-Result always goes to accumulator
-in1 or in2 can be A
-A = register 0
-
-mov 0, 1 == star 1
-mov 1, 0 == ldar 1
-
-i8 i16 i32 i64 f32 f64
-
-0000
-	0
-		000 +
-		001 -
-		010 *
-		011 **
-		100 /
-		101 //
-		110 %
-		111 %%
-	1
-		000 ~
-		001 &
-		010 |
-		011 ^
-		100 <<
-		101 <<<
-		110 >>
-		111 >>>
-0001
-	0
-		000 <
-		001 <=
-		010 >
-		011 >=
-		100 !=
-		101 ==
-		110 ideq (=== / !==)
-		111 <>
-	1
-		000 !
-		001 &&
-		010 ||
-		011 bool
-		100 in
-		101 is
-		110 as
-		111 ..
-0010
-	0
-		000 closure
-		001 proto
-		010 typeof
-		011 
-		100 
-		101 
-		110 
-		111 :=
-	1
-		000 call(nargs)
-		001 index
-		010 lookup
-		011 delete
-		100 return
-		101 throw
-		110 yield
-		111 await
-0011
-	0
-		000 tailcall
-		001 yieldfrom
-		010 returnawait
-		011 
-		100 dup
-		101 switch
-		110 jz
-		111 jnz
-	1
-		000 stv(slot) - store var slot
-		001 ldv(slot) - load var slot
-		010 stu(slot) - store upvar slot
-		011 ldu(slot) - load upvar slot
-0100
-0101
-0110
-0111
-1000
-1001
-1010
-1011
-1100
-1101
-1110
-
-1111rrrr ld rrrr, imm
-
-Fixed 16 bit integers
-
-As nice as all this is, high level bytecode doesn't need to be fast. Ideally it should be 1:1 with the source, after some transformations to simplify it
-
-So instead of using a register machine like above, use something more like wasm or Python's quasi-stack machine. Stack machine for intermediates (effectively a more computable serialization of the AST) and slots for named variables. Easier to generate, easier to implement, and it saves complexity for the JIT
-
-Make ops a stream of leb128 integers optimized for single integer opcodes - extended integers are immediates
-
-Reminder: blocks are mostly useful for forward goto, vs loops which are for backwards goto
-
-* Parsing
-  - AST
-* Code generation
-  - Register allocation
-* VM execution
-  - Instruction dispatch
-  - (Dis)assembler for debug
-* Runtime environment
-  - GC
-  - Object model
-  - Core library implementations
-* 
-
-1. Strict espresso parsing strict espresso
-2. C code generator
-3. Strict espresso parsing espresso
-4. Espresso core library
-
-1. JS parsing espresso
-2. Bytecode generator
-3. Bytecode to C transpilation
-4. 
-
 https://www.youtube.com/watch?v=ARYP83yNAWk
 * Possible change to C++ exception model
 * Static exception types transparently use Result types ala Rust
+* Key takeaways from a philosophical POV:
+  - not all errors are the same
+  - state corruption (eg stack overflow, null pointer deref) - unrecoverable, panic and maybe store some state to HDD
+  - programming bug (eg failed asserts, index out of bounds, contract violation) - still unrecoverable, report to programmer
+  - recoverable error (code was unable to complete its task due to some rare but expected issue) - runtime exceptions
 
 https://www.youtube.com/watch?v=vElZc6zSIXM
 * How to make fast small data structuress
@@ -168,25 +35,6 @@ fbstring
 * Last byte is the capacity
 * When capacity is 0, it doubles as null terminator
 
-Error taxonomy:
-* Category A
-  - Corruption of abstract machine
-  - Terminate, calling code can't recover (eg stack overflow)
-  - Report to user
-* Category B
-  - Programming error
-  - Asserts, logs, contracts
-  - eg out of bounds, logic errors, violations of contract
-  - Report to programmer
-* Category C
-  - Recoverable error
-  - Throw exception, error code, whatever
-  - Code was not able to complete its task, but in an expected/recoverable way
-  - eg file not found
-  - Report to calling code
-
-----
-
 ? meta-operator "optional"
 eg: return? throw?
 	op ? operand = if(operand) op(operand)
@@ -199,12 +47,17 @@ Overloaded semantics
 
 Assignment operator x := y -> Object.assign(x, y)
 Nullish coalescing operator ??
+* Same semantics as optional meta-operator, but using nullish instead of falsey
 
 = meta-operator "inplace"
-Rather than defining multiple in-place operators, they're defined in one go using a meta-operator =
+Rather than defining multiple in-place operators, they're defined in one go using a meta-operator = which generalizes to all operators, eg === = is inplace id equality
 
 x::y(z, ...args) = x.y.call(z, ...args)
 * eg Array::concat(arrayLike)
+
+x->y == (t = symbol("tmp"); x[t] = y; x[t] after delete x[t];)
+
+Basically access y as if it was a property of x. This has two primary uses, generic function application and accessing "private" members (which normally require this.y)
 
 Going with the first idea, the parser could only understand ASCII and leave translation to the ZIO abstraction. That way, we could do stuff like whitespace -> space, newlines -> \n, etc so the parser never has to check more than those basic characters. It also adds flexibility to the source of the buffer stream, which can be encoded any which way so long as it boils down to ascii. To enable this, we could also have some kind of parser-only identifier escape to support name mangling.
 
@@ -275,7 +128,7 @@ Interesting ideas:
 
 We have two separate types for char vs string, particularly since char is easily represented as a simple value. This lets us encapsulate some of the weirder Python methods like isdigit() on normal strings and a chr/ord distinction. chars act like a special mixture of string and int. For instance, string has string*int = string.repeat(x) but char*int results in an int. "a" + 1 = "a1", "a" + char('a') = "aa". On reflection, I won't bother having char literals because it has a lot of possibilities to mess things up (eg ' '*10 is a commonish Python idiom, but if that were a char literal it would produce nonsense). Instead we can do things like s[x].isDigit() which doesn't do weird Pythonic things like check every character (or maybe it can still do that for strings, but without iteration for chars)
 
-[...each(var x in y) x*2] = [...(function*() { each(var x in y) yield x*2; })()]
+[...each(var x in y) x*2] = [...(function yield() { each(var x in y) yield x*2; })()]
 
 Prototype chain lookup optimization: prototype is in the shape, not the object
 * Also: use IC to store which prototype had a method, requires a way to poison the IC (v8 uses a "ValidityCell" property on prototype shapes)
@@ -440,14 +293,9 @@ Array is a fixed-length sequence
 Table is a hash:int hashtable which can be reused
 Func uses opcodes
 CFunc uses a standardized format
-NFunc uses native calling conventions
 Closure contains upvals - only valid for Func
 
-Structure padding rules:
-* Every member has an address divisible by its size, padding is inserted /before/ a member to maintain this invariant
-* The struct as a whole has an address divisible by the largest member type
-
-define y.x = {
+def y.x = {
 	get() {},
 	set() {},
 	delete() {},
@@ -467,13 +315,11 @@ GC Policies:
 * Primitive - Bump allocator + quipu to keep track of free blocks. Objects tend to be small and word-aligned
 
 The sequence policy is optimized for many small variable-length arrays or few larger arrays. If a larger size is requested than can be supported by an arena, we can either allocate another arena or "give up" and use plain malloc/realloc. Might also have a mechanism for "freezing" and "unfreezing" sequence types, which move them to/from the sequence pool. This could be implicit too, to free up sequence memory as needed
-https://www.youtube.com/watch?v=wd3PJHCrQ7k
+
 Type inference:
 * In methods we can automatically assume the type of `this` which short-circuits the slow prototype chain lookup path in favor of direct slot indexing. This isn't guaranteed, because methods are ordinary functions and can be called with foreign types, but it allows us to provide a specialized version
   - Specialized bytecode has to be thrown away if the prototype is changed
 * Support TypeScript-like type annotations, functions are still defacto monomorphic. I keep flip-flopping on implementing this, but considering both Python and JS (via TypeScript) are going with type annotations, and the fact that it gives me anxiety imagining not having type information readily available when I want it to be available, it'd be dumb not to. Also even Python supports generics
-
-Don't use interfaces - they serve no runtime benefit and are implicitly handled by the code which calls them. If a type isn't known ahead of time (eg you would put in a "callable" interface), then nothing can be specialized ahead of time because property lookup happens regardless. Type hints are only useful if we know the EXACT type, because interfaces are implicit in prototype programming. But interfaces are useful at least as design by contract
 
 func::() returns a generic function
 func::(int) returns a function with the first parameter specialized on int, etc
@@ -502,13 +348,9 @@ Types of handles:
 * Can use NaN boxing to encode float
 * C string
 * Char
-* Smallstring
+* Int
 
-It occurred to me what espresso is, in a sense - it's like a low-level language without typing, or rather, with late-binding of types and interfaces. All the types and structures are designed to have O(1) access once bindings are determined and emplaced via JIT. We're even looking at providing explicit support for struct types, which have static storage types which are verified dynamically
-
-For strings we do want to optimize for the short case - it would be very strange if we had hashes which were consistently larger than the strings they code for. Small strings can essentially act as their own hashes
-
-Ok for GC I keep thinking about premature optimizations and such, but in some cases it's justified - almost no GC objects are ever going to be more than a few hundred cells. For generality we can use 16-bit sizes, which fits nicely into the LuaJIT 3.0 GC model. For anything larger, at that point I would just start doing malloc because it isn't worth worrying about.
+Strings are split between two different cases - interned, and normal. Interned strings are expected to never go away and include documentation, metadata, and keys. They're specifically for cases where we don't care about the contents of the field, only the identity. Normal strings are for everything else, from ordinary string literals to concatenations and formattings. Basically anywhere we're dealing with the contents and not the identity.
 
 Idea: If string interpolation is implicit, and bytes can just be a normal constructor, we can use backticks to represent raw (unescaped) strings and no longer have any flag parsing
 
@@ -516,7 +358,7 @@ Idea 2: Have a special operator (";"?) which is called when a value appears at t
 
 Primary semantic difference with strict mode is the any type is explicit, and no operator overloading
 
-This comes in conflict when we try to combine the two. Prototype languages purposefully eschew formal typing and the type hierarchy is dynamically generated. OOP-style ownership of methods for single dispatch thus makes sense. When you try to generalize to multimethods though, none of the parameters own the function. The behavior is entirely defined by their runtime type. Slate gets around this by inverting the ordinary relationship, where each prototype is given ownership of a "role" when the method is defined, eg "I can implement role 2 with these methods" and from this we can derive a set of applicable methods. This is a clever hack, but it inverts the intuitive conceptual model and spreads multimethod implementation across all objects, even if they don't specialize a method
+Prototype languages purposefully eschew formal typing and the type hierarchy is dynamically generated. OOP-style ownership of methods for single dispatch thus makes sense. When you try to generalize to multimethods though, none of the parameters own the function. The behavior is entirely defined by their runtime type. Slate gets around this by inverting the ordinary relationship, where each prototype is given ownership of a "role" when the method is defined, eg "I can implement role 2 with these methods" and from this we can derive a set of applicable methods. This is a clever hack, but it inverts the intuitive conceptual model and spreads multimethod implementation across all objects, even if they don't specialize a method
 
 roles = [
 	{int: [method1, method2]},
@@ -582,49 +424,21 @@ function dispatch(roles, types) {
 	}
 }
 
-Lexical multimethods seem to add too much magic. I like the idea of functions being fundamentally monomorphic, but the inner implementation dispatches based on type. Why do I want multimethods? For one, it gives a language-level feature for implementing specializations, which a dynamic JIT is bound to need. If we're already dispatching to different specializations, why not make that available to end-user code? The second issue is that operators are fundamentally polymorphic, and the typical solution (trying left.op then right.op) is adequate, but prone to fragility as it couples the data. Python's system gives builtin types a table of other types they have implementations for, then returns NotImplemented if they aren't an exact match. Then this defers to the right side, which is necessarily more specific than the left since we've ruled out that it's a known valid type
-
-So for instance, float + complex - float.__add__ fails because complex isn't in its table. Then, complex.__radd__ works and returns a complex number
-
-In a manner of speaking, espresso prototypes as-is are abstract types, separated from their instances (unlike eg JS where they're meant to be the same thing, objects). This isn't quite the same as Julia abstract types, though, which cannot be instantiated.
-
 I think I should include Julia's parametric types in espresso as syntax sugar - they're functionally identical to a higher-order function returning a dynamically created class (maybe with memoization), but a lot of edge cases have to be handled as well like implementing it as an array indexing, disabling setting, disabling function call as the parametric type is abstract, etc
 
 ---
 
-After over a week of deliberation, making multimethods a language-level feature just adds too much complexity for too little value. The main concern for making it not language-level was how to implement operators, but they add complications of their own (eg up to O(n^2) complexity *per-operator* with no obvious way to cache methods without more type information than is expected) and even without multimethods I want operators to be special global functions implemented in the standard library - thus, amenable to multimethod-esque extension. As a language feature it's little more than syntax sugar, but this bakes its semantics into the language. Much better to use something like decorators instead.
-
-Also re-iterating the wisdom that inplace operators shouldn't be overloadable, but rather merely syntax sugar. Efficiency of in-place operation isn't worth nearly doubling the supported operators and adding some kind of pass-by-reference feature. Plus nearly the same performance can be achieved with copy-on-write. That being said, I could also possibly use the return of the operator as the final value to be assigned, so it acts like a proxy for the particular usage...
-
-Equal as a meta-operator (but not used to build eg == and !=, it still applies for those as "== =" etc)
+Equal as a meta-operator (not used to build eg == and !=, it still applies for those as "== =" etc)
 
 Still deliberating on macros and giving AST access to code - but I'm thinking to not support it because it's a very niche use for mostly esoteric semantic reasons which could potentially disable optimizations and make the language more complex
 
 use ref[T] which dereferences with val[], which can have semantics outside strict code - that is, a mutable reference value which can hold immutable values. It's also trivial to implement with operator overloading, as .set is the only operator overloads which work with assignment
 
-No fundamental way to distinguish x.y and x["y"]... Actually, what about identifiers being symbols rather than strings? Ala Ruby. But that causes issues with literal objects and quoting identifiers. Also our conception of symbols comes from JS, where they aren't actually coerced strings but rather unique objects with a descriptor. There isn't any good reason to *want* to distinguish the two syntaxes anyway I would think, except maybe to not have to dispatch different methods based on the type.
-
 Strict code has a number of special types not available outside strict code. i8, i32, etc and any, a type representing boxed values which must be explicitly unboxed, and the actual implementation of that is platform-dependent. We want to be careful what implicit operations we allow - type promotion is fine because it's roughly a no-op, but not int/float conversions or anything related to strings. The data model of objects should also be entirely explicit, which allows in-language implementation of a meta-object model with generic interfaces for JIT and GC.
 
 "as" operator reserved for strict code only (at least, it doesn't make sense to use it in non-strict code) - any kind of no-op type promotion, but mostly for unboxing any or union values.
 
-lhs bin / lhs rhs
-
-lhs bin: + - * / % ** // %% << <<< >> >>> ~ & | ^ ~~ && || ^^ != == !== === > >= < <= <> .. ::
-lhs: !
-lhs rhs: ++ --
-bin: ?? .? ->
-Special: . : ... @ ,
-
-We don't need to bother with letting operators be both lhs and bin if they can't be overloaded eg && || . -> , ! =
-
 Add ! and ? for rest identifiers to make it more lispy?
-
-++ -- ** // %%
-<< >>
-&& || ?? :: ..
-
-<<< >>> ... ===
 
 the familiar of zero
 brave story
@@ -652,23 +466,10 @@ bool(none) = false
 string(none) = "none"
 none(...) = no-op - note, it's a lot like JS void
 
-pure function qualifier?
-* All upvals are immutable
-* All global functions are pure
-* no references to "this"
-* incompatible with async and generators
-
 Parser design constraints:
 * ZIO: must be stateless, no feedback from later stages and no partial parsing
 * Lexer: Generates one token at a time, no lookahead, and no feedback from later stages (eg no regex syntax, which requires knowing the expected next token type). Stack depth is shallow and error conditions are handled by return
 * Parser: Generates an AST using a lispian data structure. Stack depth is deep and requires longjmp for error conditions. Memory is allocated on the AST which has a root node, so it can all be freed no matter how deep. Avoid large-scale AST optimizations, only local
-
-proto Shark is Animal {
-	public a, b, c; # Always available, instantiated as slots on instances
-	private d, e, f; # Like public, but referent must be this
-	static x, y; # Available on Shark
-	
-}
 
 Destructuring syntax implemented naively would have infinite lookahead, which is unacceptable for the language's design. A much better solution is to parse a destructuring expression as an object, keeping track of whether or not it's a valid lvalue, and deciding after the following token whether or not it's going to be used as one. A similar issue is encountered with arrow functions. If we parse it like JS, we don't need lookahead per-se, but we still need an intermediate structure which is converted at the end to either function parameters or a parenthesized tuple. However, if we use the same construction as destructuring this becomes similarly trivial - the only side effect is that it's more permissive than JS eg:
 * x, y => x + y
@@ -697,117 +498,16 @@ new T(...args) = do => {
 	return T::new($x, ...args) ?? $x;
 }
 
-V8's pipeline:
-* code -> AST -> bytecode -> peephole optimizations -> sea of nodes -> native
-* Big assumption seems to be that bytecode is slow, so effort spent optimizing it is mostly wasted (except peephole which is ~O(n))
-* Generated native code has assertions which "bail" to deoptimization
-
 function f(this, ...) {}
 * lets you pass "this" as the first argument rather than implicitly. That is, if the function is called without "this", the first argument is used instead.
 
-do {
-	xxx
-} while(cond) {
-	yyy
-}
-for(;;) {
-	xxx
-	if(!cond) break;
-	yyy
-}
-
-Prototype inheritance
-Tail call
-Await async promise
-Classes
-Operator overloading
-Static scoping
-Duck typing
-Low complexity
-Reduce keywords
-Copy on write using prototype chain
-Spread, rest, and deep destructuring
-JS object syntax
-Everything is an expression
-Function header parameter destructuring
-
-real
-	int
-		bool
-
-asm {
-	(func (export "int+"))
-}
-
-struct int {
-	value: i64;
-	
-	strict +(a: any, b: any): any {
-		if(a is none) return b;
-		
-		if(this === a) {
-			switch(typeof b) {
-				case bool: return a as i64 + i64(b as bool);
-				case int: return a as i64 + b as i64;
-				case real: return f64(a as i64) + b as f64;
-				
-				case string: return string.concat(int.string(a), b);
-				
-				default: return b->b.proto::+(a, b);
-			}
-		}
-		else {
-			return a.int() as i64 + b as i64;
-		}
-	}
-	
-	-(a, b) {
-		if(a is none) return strict { -b as i64 };
-		
-		if(this === a) {
-			switch(b.proto) {
-				case bool: strict {
-					return x as i64 - i64(b as bool);
-				}
-				
-				case int: strict {
-					return a as i64 - b as i64;
-				}
-				
-				case real: strict {
-					return f64(a as i64) - b as f64;
-				}
-				
-				default:
-					return b->b.proto::-(a, b);
-			}
-		}
-		else {
-			return a.int() - b;
-		}
-	}
-	
-	*(a, b) {
-		if(this === a) {
-			switch(b.proto) {
-				case bool: strict {
-					return x as i64 * i64(b as bool);
-				}
-			}
-		}
-	}
-}
-
 There's a complex taxonomy of types here which we have to wrangle somehow, particularly given polymorphic types have the same auto-coercing behaviors
 * smi = 28 (?) bits on 32-bit, 63 bits on 64-bit
-* heap integer = largest size available
+* heap integer = largest size available (possibly special case of long)
 * long = arbitrary-precision integer
 * These types should be transparent, presenting to user code with a single "int" type
-* Might be able to combine long and heap integer implementations, using an algorithm which is identical to heap integer 
 
 Semantics here: Strict mode has strict typing, only allowing native types. To use variables from the enclosing scope, adding "as type" is mandatory. This expression throws a TypeError if the type of the operand isn't EXACTLY that type. The point of this, at least in this context, is to define the polymorphic operators in terms of the native operators which require known types and for both operands to be the same type, thus detangling it from whatever language or JIT library is being used to implement the language.
-
-There should also be strict functions which require all parameters to be typed and have similar draconian typing rules but otherwise share the same syntax. These throw TypeError if the types aren't exact.
 
 Native types include:
 * any (must be explicit, operators aren't respected *including* indexing anything except proto and size)
@@ -827,13 +527,11 @@ Idea: 4 levels of code, asm, strict, static, and dynamic.
   - Though this wouldn't take into consideration the target dependence of assembly, maybe `asm { x86 { ... } arm { ... } powerpc { ... } wasm { ... } }`
 * strict provides a C-like strict typing with espresso syntax. This level should be sufficient for JIT, as everything should eventually evaluate to it
 * static is the normal modality for espresso and is mostly restricted to having static scoping
-* dynamic to refer to a fourth level of code which has dynamic scope bindings as with REPL
+* dynamic to refer to a fourth level of code which has dynamic scope bindings as with REPL. This is implemented by transparently turning variable lookup into a dict lookup of the dynamic namespace object. If a variable is undefined, it must come from one of the enclosing dynamic scopes. Explict global names can be collated into slots for the object
 
 It's unclear to me what needs to be done about the asm level, too tired I guess. At minimum it needs to support strict code, but there's certain constructs which just don't boil down to strict code:
 * boxed values can't be defined by the language itself
 * don't have a way to define non-strict functions in terms of strict code
-
-Currently I think some of this confusion comes from the fact that we decided to define polymorphic operator overloads in terms of strict code - thus enabling us to skip defining callbacks in whatever the host language is. But we want to be self-hosted, ideally, so what does that look like?
 
 To compile a self-hosting interpreter we'd want all (some?) of the code to be compiled to be in strict mode, which ensures that there isn't any runtime ambiguity because it disallows implicit boxing. To self-host it would also need a notion of what machine code to emit, which is where asm comes in. Asm being a construct only available to the top level of execution, lest we start breaking safety. Which is odd, because it sort of uses a superset of the language to ease development - parsing asm expressions would only be done for the top level, but not subsequent levels
 
@@ -841,42 +539,6 @@ Alternatively we could eschew explicit asm statements for a higher level bytecod
 
 Strict mode represents boxed values with the opaque type "any" - the actual implementation of the type is completely unspecified, only defining a few operations for type introspection and explicit conversion. So, the format of any is up to the backend as it should be since it has a better idea of the limitations of boxing, eg 64-bit backends can use NaN-boxing instead of pointer tagging which gives more inline values
 
-What about the JIT aspect then? Code generation ordinarily requires generating the code which is then sent to the assembler, but if we're RUNNING strict mode, that isn't going anywhere. Could we have some kind of bytecode which expresses strict mode semantics maybe? Then say it parses "function x(a, b) { return a + b }", the AST of that would be (function x (params a b) (return (+ a b))). Would we then lower that into strict mode? function x(a: any, b: any): any { return dispatch("+", a, b); } or something? If we can express everything as strict mode then may as well AOT right?
-
-Bytecode (currently):
-
-function "x" 2
-	param 1 -> %0
-	param 0 -> %A
-	add %A, %0 -> %A
-	return %A
-
-To get strict mode semantics here, we must:
-1. Verify a.proto has a shape (repeat for b.proto if fail)
-2. (a.proto as object)["+"] exists and is callable?
-3. Call that
-
-strict function x(a: any, b: any): any {
-	var p = a.proto;
-	if(p is object) {
-		var add = (p as object)["+"];
-		if(add implements callable) {
-			return a->add(a, b);
-		}
-	}
-	
-	p = b.proto;
-	if(p is object) {
-		var add = (p as object)["+"];
-		if(add implements callable) {
-			return b->add(a, b);
-		}
-	}
-	
-	throw new TypeError(f"Invalid operands for +");
-}
-
----
 Maybe the "as" operator could return an intermediate value which is pre-offset into the value?
 
 Objects have the following format:
@@ -899,44 +561,11 @@ Design considerations for strict mode:
 Difficulties with strict mode:
 * How do we implement the GC when the system itself is supposed to rely on it?
 
-gcalloc(size) -> gcbytes
-
-struct ObjectArena {
-	blocks: u64[512];
-	markmap: u64[512];
-	
-	cells: GCObject[4096];
-	
-	
-}
-
-gcalloc(sizeof ObjectArena)
-
-x: i32[]
-y: *i32[] => array of i32 pointers
-z: *(i32[]) => pointer to i32 array
-
-*((i32, i32) => i32)[] == array of pointers to functions taking two i32s and returns an i32
-* The function type itself is a pointer to the PC of the function, making this a function pointer pointer
-
-i32[?] == i32 array with unknown size not stored in structure
-
-struct GCHeader {
-	data: u64;
-	size: u32;
-	data: u32;
-}
-
-int -> ptr ERROR
-*i32 
-
 Take a page from C#, have an "unsafe" context as well as "strict" (which C# doesn't have, it's always strict) - unsafe enables pointer types and operations
 
 Unsafe semantics:
 * An unsafe block must be in an unsafe function
 * A file containing unsafe code MUST be imported using "unsafe import"
-
-ptr.x
 
 function* fib(n: i32): i32 {
 	var a = 0, b = 1;
@@ -946,17 +575,7 @@ function* fib(n: i32): i32 {
 	}
 }
 
-i32 is always passed by value unboxed
-
-fib(0)
-* boxed 0
-* fib has native binding, convert boxed 0 to unboxed i32
-
-One major issue I see with the naive implementation is that whether or not a value is passed boxed or unboxed depends on the particular type. If it's in the set of "unboxed" types (including struct?), then it's passed by value - otherwise it's boxed. But I don't like how the underlying implementation changes in a way you just have to know
-
-So I think it's best to restrict unboxed types to strict contexts, which changes semantics. The whole point is to give the option to sacrifice flexibility for speed
- 
-Need to be able to pass struct by value, and also by reference as a GC object if we want to use it in managed code.
+Adding the i32 type annotation acts as an extra level of type hinting. A boxed value is passed to the function, which then checks the type is int and fits in 32 bits. The rest of the code can then assume an unboxed value, which may need reboxing if passed to non-strict functions.
 
 proto is mutable, struct is not. Struct is defined by its definition, proto is more or less a bag of methods with a hint at how much to allocate
 
@@ -991,3 +610,48 @@ Node gets around this with .node binaries, which must be precompiled. It doesn't
 C# gets around this because it's a compiled language, even though it runs on a VM. When unsafe code (same semantics) is included in a module, it must be compiled with an /unsafe flag to permit its use. But, once the file is compiled it's considered "safe" and can be linked to other files without issue.
 
 So let's do this - "unsafe import" is still a thing, and it specifies that the file to be imported may contain unsafe code, mostly used for rapid prototyping. For actual libraries however, they can be AOT compiled into object files which are treated as "safe". The extra compilation step is considered part of the safety, where arbitrary machine code can't be run without effort to enable it. If a unit is compiled, we know it's either safe or was compiled with the /unsafe flag
+
+Ambiguities which come with relaxed restrictions for syntax:
+
+Basic pattern for functions is "function" [ident] [lvalue] block. Main thing I was concerned with was function x y { ... } which would be valid but difficult to blacklist, made more complicated by short method syntax:
+ident [lvalue] block
+
+doThing {
+	
+}
+
+"function" [ident] lvalue block
+
+Open question is how permissive we want to be - should parameters always be surrounded by parentheses, or should we make it any lvalue?
+
+Methods use a shorter format without the function keyword
+
+add(x, y) {}
+add[x, y] {}
+add{x, y} {}
+ -> for explicit functions, make parentheses mandatory. 
+ 
+function x y {
+	
+}
+
+Everything is an expression, but there is still a notion of statements - these are used to distinguish between automatic returns and differences of semantics. So for instance, without the concept of statements the following would return an instantiated generator:
+
+function test() {
+	for(var i = 0; i < 10; ++i) {
+		print(i);
+	}
+}
+
+In general this is really bad because it makes functions "leaky" - if there isn't an explicit return, instead of returning none (like one would expect) it returns whatever structure you were last working with.
+
+Statements are a recusively defined property. Expressions cannot contain statements, but statements can contain expressions. This recursion stops at the top of an enclosing function's scope (or global scope). A function scope is considered a series of statements. If it's an expression, all subexpressions are expressions and not statements. Constructs which can be statements include:
+
+Control structures: if then else loop while for switch try
+Control flow: return fail break continue redo goto (these all have type `never`)
+* yield does have a type but counts as a statement
+Assignments: any mutating operator, x = y, x += y, ++y, etc
+
+Basically anything with side effects. This definition would include function calls, which is somewhat problematic... so have a "none" return type ignore any implicit returns
+
+There are also empty statements, as in ;; which forward the previous value. If there is no previous value eg (;) then `none` is assumed. Note that this is not an empty tuple because the inclusion of the semicolon operator makes this a sequential evaluation.

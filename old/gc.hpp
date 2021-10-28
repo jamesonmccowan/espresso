@@ -180,7 +180,7 @@ struct GC {
 		return *new(arenas.top()->alloc(bytes)) T(bytes);
 	}
 	
-	GCObject* alloc_raw(size_t bytes); {
+	GCObject* alloc_raw(size_t bytes) {
 		LOG_DEBUG("GC: Alloc %d bytes as raw", bytes);
 		GCObject* p = arenas.top()->alloc(bytes);
 		new (p) GCObject(bytes, GCObject::USERDATA);

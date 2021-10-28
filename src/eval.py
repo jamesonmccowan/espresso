@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
-from ast import Var, Value, Op
-from runtime import EspNone
+from types import SimpleNamespace
+
+from ast import Var, Value, Op, Statement
+from runtime import EspNone, EspProto, EspString
 
 class Visitor:
 	def visit_const(self, v):
@@ -25,7 +27,7 @@ class StackFrame:
 		self.vars = vars
 	
 	def __str__(self):
-		return str(self.vars)
+		return "StackFrame" + str(self.vars)
 	__repr__ = __str__
 
 SIMPLE_OPS = {
@@ -64,8 +66,7 @@ SIMPLE_OPS = {
 	"<<": lambda x, y: x << y,
 	"<<<": None,
 	">>": lambda x, y: x >> y,
-	">>>": None,
-	
+	">>>": None
 }
 
 class Signal(Exception): pass
@@ -81,7 +82,7 @@ class EvalVisitor(Visitor):
 		self.stack = []
 	
 	def lookup(self, name):
-		for x in range(1, len(self.stack)):
+		for x in range(1, len(self.stack) + 1):
 			v = self.stack[-x].vars
 			if name in v:
 				return v
@@ -102,9 +103,17 @@ class EvalVisitor(Visitor):
 					ls.append(v.body.visit(self))
 				except ContinueSignal:
 					pass
-		except BreakSignal:
+		except (BreakSignal, StopIteration):
 			v.el.visit(self)
 			return ls
+	
+	def visit_branch(self, v):
+		if v.kind == "break":
+			raise BreakSignal()
+		elif v.kind == "continue":
+			raise ContinueSignal()
+		else:
+			raise NotImplementedError(v.kind)
 	
 	def visit_switch(self, v):
 		# Evaluate the expression to switch on
@@ -128,8 +137,6 @@ class EvalVisitor(Visitor):
 		try:
 			last = EspNone
 			while True:
-				print("case", case)
-				print("body", case.body)
 				last = case.body.visit(self)
 				
 				case = case.next
@@ -155,35 +162,54 @@ class EvalVisitor(Visitor):
 		return self.lookup(v.name)[v.name]
 	
 	def visit_assign(self, v):
+		# NOTE: This doesn't handle destructuring!
 		name = v.name.name
 		
 		if v.op:
-			val = self.visit_op(
-				Op(v.op, Value(self.stack[-1].vars[name], v.value))
-			)
+			print(self.stack)
+			old = self.lookup(name)[name]
+			val = SIMPLE_OPS[v.op](old, v.value.visit(self))
 		else:
 			val = v.value.visit(self)
 		
 		self.lookup(name)[name] = val
 		return val
 	
+	def visit_format(self, v):
+		s = ""
+		for p in v.parts:
+			if type(p) is str:
+				s += p
+			else:
+				s += EspString(p.visit(self))
+		
+		return s
+	
 	def visit_block(self, v):
-		last = None
+		last = EspNone
 		for x in v.elems:
-			last = x.visit(self)
+			next = x.visit(self)
+			if not isinstance(x, Statement):
+				last = next
 		
 		return last
 	
 	def visit_prog(self, v):
+		self.stack.append(StackFrame(None, {
+			"iter": iter,
+			"next": next,
+			"print": lambda *x: print(*x, end='') or EspNone,
+			"pyimport": __import__
+		}))
 		self.stack.append(StackFrame(v, {x:EspNone for x in v.vars}))
 		x = self.visit_block(v)
+		self.stack.pop()
 		self.stack.pop()
 		
 		return x
 	
 	def visit_func(self, v):
 		def pyfunc(*args):
-			print(type(v.args), type(args))
 			try:
 				self.stack.append(
 					StackFrame(v, dict(zip((x.name for x in v.args), args)))
@@ -198,3 +224,56 @@ class EvalVisitor(Visitor):
 	
 	def visit_call(self, v):
 		return v.func.visit(self)(*(x.visit(self) for x in v.args))
+	
+	def visit_proto(self, v):
+		p = (v.parent.visit(self),) if v.parent else ()
+		return EspProto(v.name, p, {
+			"public": v.pub,
+			"private": v.priv,
+			"static": v.stat
+		})
+	
+	def visit_index(self, v):
+		obj = v.obj.visit(self)
+		idx = [x.visit(self) for x in v.indices]
+		'''
+		if len(idx) == 0:
+			return obj[None]
+		elif len(idx) == 1:
+			return obj[idx[0]]
+		else:'''
+		try:
+			return obj.__getitem__(idx)
+		except (AttributeError, KeyError):
+			pass
+		
+		return getattr(obj, idx[0])
+	
+	def visit_objectliteral(self, v):
+		obj = {}
+		
+		for key, val in v.values:
+			obj[key.visit(self)] = val.visit(self)
+		
+		return obj
+	
+	def visit_forloop(self, v):
+		# Doesn't account for destructuring
+		itvar = v.itvar.name
+		
+		it = iter(v.toiter.visit(self))
+		
+		try:
+			while True:
+				self.lookup(itvar)[itvar] = next(it)
+				v.body.visit(self)
+				
+		except StopIteration:
+			v.th.visit(self)
+		
+		except BreakSignal:
+			v.el.visit(self)
+		
+		# This is incorrect but I'm too tired to do it right (which would
+		#  require proper refactoring to support generators)
+		return None

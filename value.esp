@@ -1,0 +1,187 @@
+none
+bool
+int
+float
+string
+list
+dict
+object
+function
+
+struct long {
+	digits: int[];
+	
+}
+
+GCHeader
+	proto
+
+Definite primitives	
+	none
+	empty
+	bool
+	int
+	float
+
+Reference types
+* Absolute
+* Object-relative
+* Container-relative (easily relocated)
+
+GC types
+* Global hash table with bump allocator
+* Bump allocator with best fit fallback (intrusive quipu)
+* Heap allocator sorted by block size (good for realloc)
+
+intern - internal representation of strings expected to be used as keys identified by hash. They dont need to be tracked by the GC because they wont generally go out of scope, which also means we can keep a simple bump allocator
+ - similarly, we can store readonly metadata here too
+string - immutable, but can go out of scope. Use heap
+array - mutable, not resizable
+list - mutable, resizable (can be implemented as indirection to array)
+
+i8 i16 i32 i64 f32 f64 any []
+size_t fastint_t intptr_t
+
+struct long {
+	GCHeader (size, gc flags, type)
+	
+	digits: ...fastint_t;
+}
+
+Primitives:
+* none/empty/bool/int/float - representable directly
+* int/float/any arrays - GC primitives
+* shape - description of the memory used by a struct
+* struct - GC primitive which has a proto object in the first field
+* foreign struct - struct proto + immutable opaque pointer
+
+strict struct DictKeys {
+	usable: u32; # Number of usable entries (not syncd with used)
+	used: u32; # Number of used entries
+	
+	indices: ...DictKeyEntry;
+};
+
+strict struct DictKeyEntry {
+	#*
+	bool writable : 1; // Can the value change?
+	bool removable : 1; // Property can be deleted?
+	bool configurable : 1; // Can the property be configured?
+	bool ispublic : 1; // Property is public? (private requires this.* or v->*)
+	bool isoffset : 1; // Interpret value as an offset into slots?
+	bool accessor : 1; // Property is an accessor
+	*#
+	
+	key: any;
+	# Only allocated if shape is extended
+	value: ...any;
+};
+
+strict struct dict_impl {
+	#bool ownproto : 1; // Proto is an extension of the object's own properties
+	#bool extended : 1; // Whether the dictionary stores values or offsets
+	flags: u8;
+	proto: any;
+	keys: *DictKeys;
+}
+
+On its own, struct defines the shape of an object in memory, but it isnt necessarily a GC object. It can be on the stack, embedded in a struct, or have a pointer to it. To avoid messing with memory with struct prefixes, a structs definition is flattened on declaration into the top level struct descriptor
+
+Proto is always a GC object with a prototype prefix and its always referred to by reference
+
+dict probably has to be a primitive too because it would effectively be reimplemented to support struct descriptors which becomes circular
+
+strict struct vs struct - strict doesnt store the struct descriptor at all, its equivalent to a C struct and using them in normal code wraps them as if they were foreign structures (struct descriptor + opaque pointer)
+
+proto struct {
+	des: Descriptor;
+	ptr: opaque;
+}
+
+GC objects:
+* raw data (no metadata, opaque, raw bytes) (void&)
+* external pointer (with metadata) (void*)
+* internal long pointer (GCObject*)
+* i8 i16 i32 i64 f32 f64 array allocations (mutability is a higher level construct)
+* eternal data (interned strings, metadata, core library, etc) (bytes)
+* objects
+
+allocation types:
+* eternal immutable pool
+* heap reallocatable 
+* general purpose alloc
+* external alloc (malloc)
+* stack
+* registers
+
+gc.intern(nbytes) -> raw data
+gc.heap(nbytes) -> raw data
+gc.alloc(nbytes) -> raw data
+
+i8 i16 i32 i64 f32 f64 external* internal* object any function
+
+Internal ABI:
+* Use Python METH_FASTCALL-like ABI, bare object array passed with length
+  - This is super flexible implementation wise, because we could pass a small stack-allocated array or a GC array if that isnt big enough
+* Might be useful to make a distinction between leaf C and re-entrant C
+  - Leaves can used a shared buffer since they wont ever overlap
+  - Re-entrant might require stack or gc allocation of arguments
+
+Native bindings arent primitives, theyre FFI callable interfaces which in the future can be JIT compiled
+
+Primitive callables:
+Bytecode
+CFunction
+
+GC Primitive types:
+* Simple values (none/empty/true/false)
+* smi, char, float
+* cstring
+* intern
+* string
+* symbol
+* opaque
+* i8[], i16[], i32[], i64[], f32[], f64[], any[]
+* GCObject
+* Bytecode
+* CFunction
+
+proto string {
+	private data: i8[];
+	
+}
+
+What are the reasons for making a type builtin?
+* Bit interpretation (simple/float/pointer)
+* Semantic tag - opaque, intern, symbol, GCObject, cstring, function
+* Omit proto pointer (string)
+* Protoless data (array types)
+
+String could be implemented separately, but its used so often it would be catastrophic to do so
+
+Symbol and intern arent true objects, more unique hashes which have metadata stored in a central repository
+
+Dict should be builtin because things become weirdly circular without it
+
+GC types have to be representable with 32 bit alignment. Incidentally we have a lot more bits to play with because the GC has the type tag field which contextualizes the bytes. Replicating the type on LiveValues has use in that fields can be indexed directly without checking the GC type, which would kill speculative execution
+
+simple - same as 32 bit LiveValue (constants + smi + intern + symbol)
+string
+i8[], i16[], i32[], i64[], f32[], f64[], any[], object[]
+dict
+object (proto + object slots)
+bytecode (...i8?)
+CFunction (ptr)
+opaque
+
+intern(hash -> strtab)
+symbol(hash -> strtab)
+strtab[string...] (for eternal strings only)
+
+doctab? ptr -> strtab (docstrings dont change either)
+
+instead of strtab, maybe call it gktab (global konstant tab) since wed put a bunch of non string stuff there too, like bytecode
+
+Somewhat interesting point, indirection like this where the actual data is accessed via a hash table is trivially compactable
+
+long needs to be a builtin type to accomodate implementation differences between smi widths on different platforms. Floats dont matter because loss of precision isnt as noticeable

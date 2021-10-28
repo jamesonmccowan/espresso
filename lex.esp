@@ -64,7 +64,7 @@ const RADIX = {
 
 const
 	NAMES = list(PATS.keys()),
-	TOKEN = re("\{PATS.values()->join(')|(')})", "m"),
+	TOKEN = re("(\{PATS.values()->join(')|(')})", "m"),
 	COMMENT = re(`\s*(#\*(?:.|\n)+\*#\s*|#\{|#.*$)`, "m"),
 	RECURSIVE_COMMENT = re(`#\{|#\}`, "m"),
 	NEWLINE = re`\n`,
@@ -224,24 +224,24 @@ proto Lex {
 			case in RADIX => {
 				var r = RADIX[type];
 				if(r != 10) tok = tok[2:]
-				type = "const";
+				type = "val";
 				val = int(tok.replace("_", ""), r);
 			}
 			case "flt" => {
-				type = "const";
+				type = "val";
 				val = float(tok.replace("_", ""), r);
 			}
 			case "sq":
 			case "dq":
 			case "bq" => {
-				type = "const";
+				type = "val";
 				val = tok[1:-1]
 			}
 			
 			case "sq3":
 			case "dq3":
 			case "bq3" => {
-				type = "const";
+				type = "val";
 				val = tok[3:-3]
 			}
 			
@@ -253,7 +253,7 @@ proto Lex {
 		}
 		
 		var {pos, line, col} = this;
-		return new Token(val, type, pos, line, col) finally this.repos(m);
+		return new Token(val, type, pos, line, col) after this.repos(m);
 	}
 }
 
@@ -306,7 +306,7 @@ proto Parser is Lex {
 		}
 	}
 	
-	expected(what) = this.error("Expected " + what);
+	expected(what) = this.error("Expected \{what}");
 	
 	addVar(v) = this.scope[-1].push(v);
 	
@@ -326,12 +326,12 @@ proto Parser is Lex {
 			val = cur.value,
 			ct = cur.type
 		
-		if(val in set(")", ";", "}") return none;
+		if(val in set(")", ";", "}")) return none;
 		
 		this.consume()
 		
 		return switch(ct) {
-			case "const" => new Const(val);
+			case "val" => new Const(val);
 			
 			case "id" => new Var(val);
 			
@@ -344,7 +344,7 @@ proto Parser is Lex {
 					with(this.stack.push([])) {
 						return
 							semiAsExpr([...this.semichain()])
-							finally this.expect(")");
+							after this.expect(")");
 					}
 				}
 				# else if(val == ")") {}
@@ -431,12 +431,12 @@ proto Parser is Lex {
 					else func;
 				}
 				
-				case "try" => fail new NotImplementedError("try");
+				case "try": fail new NotImplementedError("try");
 				
-				else => fail this.error("Unimplemented keyword " + val);
+				else: fail this.error("Unimplemented keyword \{val}");
 			}
 			
-			else => fail this.error("Unknown token " + val);
+			else fail this.error("Unknown token \{val}");
 		}
 	}
 	
@@ -455,7 +455,7 @@ proto Parser is Lex {
 			}
 		}
 		else {
-			this.expr() finally this.maybe(";");
+			this.expr() after this.maybe(";");
 		}
 	}
 	
@@ -491,7 +491,7 @@ proto Parser is Lex {
 						loop {
 							this.expr_impl(PRECS[":"] + 1)
 						} while(this.maybe(":"))
-					))
+					));
 				}
 			}
 			then continue;

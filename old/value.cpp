@@ -4,12 +4,6 @@
 #include <algorithm>
 #include <cstring>
 
-/**
- * 
- * For Kitty: "How long do you want to be dead?"
- * 
-**/
-
 bool esp_ideq(const Value& x, const Value& y) {
 	return x._value == y._value;
 }

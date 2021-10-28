@@ -327,7 +327,7 @@ then {
 else {
 	# Try block interrupted by an error (equivalent of catch)
 }
-finally {
+after {
 	# Always executed
 }
 ```
@@ -400,8 +400,8 @@ proto {
 }
 ```
 
-### Finally
-The `finally` keyword is a pretty exotic addition. In effect, it's a reversal of the `;` operator. The first value is the result, and the second value is evaluated afterwards, but its value is ignored. This was implemented to accomodate a common programming pattern:
+### After
+The `after` keyword is a pretty exotic addition. In effect, it's a reversal of the `;` operator. The first value is the result, and the second value is evaluated afterwards, but its value is ignored. This was implemented to accomodate a common programming pattern:
 
 ```js
 var tmp = this.doThing();
@@ -412,22 +412,34 @@ return tmp;
 which can be replaced with:
 
 ```js
-return this.doThing() then this.doAnotherThing();
-return this.doThing() finally this.doAnotherThing();
+return this.doThing() after this.doAnotherThing();
 ```
 
-This is also a generalization of the `try`-`finally` construct present in many C++ descendents. Where that is ordinarily a fairly rarely used keyword with only one contextual use-case, this has broad generic meaning w hich is valid in both contexts. Thus
+This is also a generalization of the `try`-`finally` construct present in many C++ descendents. Where that is ordinarily a fairly rarely used keyword with only one contextual use-case, this has broad generic meaning which is valid in both contexts. Thus
 
 ```js
-try x finally y
+try x after y
 ```
 
 is actually *parsed* as
 
 ```js
-(try x) finally y
+(try x) after y
 ```
-This is somewhat in conflict with its usage as the `then` block which all control flow expressions support, but it's expected that this ambiguity won't show up in the vast majority of cases. Lexically this is unambiguous, `then` blocks always take priority and you can always wrap the expression in parentheses to use a `then` expression.
+
+As a side note, this can also be used to swap variables:
+```js
+x = y after y = x
+```
+
+expanding to
+```js
+x = (
+	var tmp = y;
+	y = x;
+	tmp
+)
+```
 
 ## Type hierarchy
 never (type of a function which never returns)
@@ -488,6 +500,7 @@ proto [ChildName] [is Parent ["," OtherParent]*] {
 		#  code to initialize any default values
 	}
 	
+	# The braces here are literal, ala JS
 	get ["method"]() { #* method syntax is supported *# }
 	
 	static func() { #* static can apply to any method pattern *# }
@@ -512,7 +525,7 @@ immediate(x, y) = _function(y, x)
 Numbers are split between two types, int and float. Integers can be specified in base 2 with the prefix 0b, base 8 with the prefix 0o, base 16 with the prefix 0x, and all other numbers are base 10. Floats can be specified in base 10 with an optional exponent suffix, or base 16 with exponent expressed with p eg 0x123.456p-3. Both ints and floats can have their digits separated by an underscore. Numbers can also be suffixed by an identifier (with no spaces in between) which indicates a function to be called, eg 2px.
 
 ### Strings
-Strings can use single quotes, double quotes, or backticks with the same semantics. They all also have a triple quoted form. Raw strings (which don't process escapes other than \\ and their quote type) are indicated by a \ prefix. All strings are format strings by default, with string interpolation being indicated by \{...}. String interpolation doesn't support nesting quotations to avoid excessive complexity in the tokenizer, so strings within the braces must use a different quote type from the surroundings. Comments are not supported. Strings can also be suffixed by an identifier which is a function to be called on it (taking priority over prefix functions)
+Strings can use single quotes or double quotes which may be tripled with Pythonic semantics. Backticks are used for raw strings (escapes other than `\\` and ```\` ``` aren't processed). Single and double quoted strings are format strings by default, with string interpolation being indicated by `\{...}`. String interpolation doesn't support nesting quotations to avoid excessive complexity in the tokenizer, so strings within the braces must use a different quote type from the surroundings. Comments are not supported. Strings can also be suffixed by an identifier which is a function to be called on it (taking priority over prefix functions)
 
 ## Inspirations
 Quick list of languages researched for feature integration:

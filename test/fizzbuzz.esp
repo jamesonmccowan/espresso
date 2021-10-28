@@ -1,0 +1,26 @@
+for(var i in 0 .. 100) {
+	print(i, ' ')
+	if(i%2 == 0) {
+		print("fizz");
+	}
+	if(i%3 == 0) {
+		print("buzz");
+	}
+	print('\n');
+}
+#*
+
+(block [] (block (var $it!)
+	(= $it! (call iter!))
+	(loop (block (var i!)
+		(= i! (call next!))
+		(block []
+			(if (== (% i! 2) 0)
+				(then (block [] (call print! 'fizz')))
+				(else none))
+			(if (== (% i! 3) 0)
+				(then (block [] (call print! 'buzz')))
+				(else none))
+			(call print! ' ')))
+		(else none))))
+*#

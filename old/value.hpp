@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <cassert>
 
+#include <bit>
+
 #if INTPTR_MAX == INT64_MAX
 	#define ESP_BITS 64
 #elif INTPTR_MAX == INT32_MAX
@@ -22,14 +24,16 @@
 
 #ifndef __cpp_char8_t
 	#if __CHAR_BIT__ == 8
-		typedef char char8_t;
+		using char8_t = char;
 	#else
-		typedef uint8_t char8_t;
+		using char8_t = uint8_t;
 	#endif
 #endif
+#ifndef __cpp_char32_t
+	using char32_t = uint32_t;
+#endif
 
-typedef uint64_t hash_t;
-typedef Value(*CFunction)(Value, int, Value*);
+using hash_t = uint64_t;
 
 /**
  * Compressed pointer, calculated as a reference relative to the value's
@@ -72,84 +76,85 @@ public:
 	}
 };
 
+struct Value32;
+#if ESP_BITS == 64
+struct Value64;
+#endif
+
 /**
  * Values in the heap are always 32 bits. On 64-bit platforms they use
  *  object-relative addressing (ie abs = &ptr + ptr) and are otherwise the
  *  same as 32-bit platform values.
  * 
  * xxx1 = smi
- * xx00 = GCObject*
+ * xx00 = GCObject* (NULL = none)
  * xx10 = 
  *   0010 = false (2)
  *   0110 = true (6)
  *   1010 = empty (10)
- *   1110 = string (14)
+ *   1110 = char (14)
+ *  10010 = intern
+ *  10110 = symbol
 **/
-struct HeapValue {
+struct Value32 {
 	uint32_t _value;
 	
-	inline Value proto() const {
-		if(_value&1) {
-			return proto_int;
-		}
-		if(_value&2) {
-			return proto_bool;
-		}
+	template<typename T>
+	constexpr bool is() const noexcept;
+	
+	template<typename T>
+	constexpr T as() const;
+	
+#if ESP_BITS == 64
+	inline operator Value64() const {
 		
-		return asGCO()->proto();
 	}
-	
-	inline bool isNone() const noexcept {
-		return _value == ESP_NONE;
-	}
-	inline bool isEmpty() const noexcept {
-		return _value == ESP_EMPTY;
-	}
-	
-	inline operator bool() const noexcept {
-		return isBool()? asBool() : proto()->callMethod("bool");
-	}
-	
-	inline bool isBool() const {
-		return _value == ESP_TRUE || _value == ESP_FALSE;
-	}
-	inline bool asBool() const {
-		return _value&(ESP_TRUE^ESP_FALSE);
-	}
-	
-	inline bool isInt() const {
-		return _value&1;
-	}
-	inline int64_t asInt() const {
-		return ((int32_t)_value)>>1;
-	}
-	
-	inline bool isReal() const {
-		return false;
-	}
-	inline double asReal() const {
-		return NAN;
-	}
-	
-	//CONVERSION(Opaque);
+#endif
+};
 
-	inline bool isPtr() const {
-		return !(_value&3);
-	}
-	
-	inline void* asPtr() {
+template<>
+constexpr bool Value32::is<bool>() const noexcept {
+	return _value == ESP_TRUE || _value == ESP_FALSE;
+}
+template<>
+constexpr bool Value32::as<bool>() const {
+	assert(is<bool>());
+	return _value&(ESP_TRUE^ESP_FALSE);
+}
+
+template<>
+constexpr bool Value32::is<int32_t>() const noexcept {
+	return _value&1;
+}
+template<>
+constexpr int32_t Value32::as<int32_t>() const {	
+	assert(is<int32_t>());
+	// Divide by 2 to ensure sign extension
+	return ((int32_t)_value)/2;
+}
+
+template<>
+constexpr bool Value32::is<void*>() const noexcept {
+	return !(_value&3);
+}
+template<>
+constexpr void* Value32::as<void*>() const {
 	#if ESP_BITS == 64
 		// Word-aligned pointer relative to the heap address
 		return ((uintptr_t*)&_value) + _value;
 	#else
 		return (void*)_value;
 	#endif
-	}
-	
-	inline GCObject* asGCO() {
-		return (GCObject*)asPtr();
-	}
-};
+}
+
+template<typename T, typename F>
+constexpr T bit_cast(F from) {
+	union {
+		F f = from;
+		T t;
+	} u;
+	return u.t;
+}
 
 #if ESP_BITS == 64
 /**
@@ -158,9 +163,9 @@ struct HeapValue {
  *  On 32-bit platforms, this is just an alias for the HeapValue. On 64-bit
  *  platforms, a variant of NaN tagging is used to make good use of the
  *  available bits. Doubles are encoded by inverting their bits. Integers
- *  are signed inverted signalling NaNs with 51 bits of significant digits.
+ *  are signed inverted signalling NaNs with 52 bits of significant digits.
  *  Other values are encoded as unsigned inverted signalling NaNs. The high
- *  3 bits of the 51 bit payload is used as a type tag, the lower 48 bits
+ *  4 bits of the 52 bit payload is used as a type tag, the lower 48 bits
  *  are the actual value. This was chosen as it's enough to cover most
  *  in-practice addressing for pointers.
  * 
@@ -178,7 +183,25 @@ struct HeapValue {
  *  native pointers, they can be dereferenced directly. Other pointer types
  *  are included for bare host pointers to avoid heap allocation.
  * 
+ * The semantics of the different types is different interpretations of the 
+ *  bits, so GC objects (which must contain their own metadata to enable
+ *  walking the GC liveness graph) aren't enumerated.
+ * 
+ * Different heap arena types:
+ *  - bytes table, simple bump allocator with no deallocations
+ *  - arena managed by quipu
+ *  - binary heap allocation to optimize realloc
+ *  - big objects use malloc
+ * 
+ * Ok we actually have a good restriction for where type data can reside:
+ *  HeapValue can't store type information for the most part, so we know
+ *  for a fact that types unrepresented by it must have a presence in the
+ *  GCObject header
+ * 
  * For reference:
+ * 
+ * s xxxf ffff ffff ffff
+ * 
  * union Value {
  *   uintptr_t base;
  *   
@@ -190,235 +213,255 @@ struct HeapValue {
  *   
  *   struct int51 {
  *     bool sign : 1 = 1;
- *     uint head : 12 = 0;
+ *     uint head : 12 = 0; // MSB of frac must be zero to be a signaling NaN
  *     uint value : 51;
  *   };
  *   
- *   // 000 = simple/object
- *   // 001 = char
- *   // 010 = cstring
- *   // 011 = smallstr
+ *   // 000 = simple/symbol/GCOject
+ *       simple =
+ *        000 none (NULL pointer, otherwise GCObject)
+ *        001 empty
+ *        010 false
+ *        011 true
+ *        100 char
+ *        101 
+ *        110 intern (rest of payload is the hash))
+ *          interns can be made unique and guaranteed promoted from strings,
+ *          thus their hashes are identities allowing equality testing without
+ *          accessing the string from memory
+ *        111 symbol (rest of payload is the unique id)
+ * 
+ *   // 001 = external
+ *        000 = opaque
+ *        001 = cstring
+ *   // 010 = array
+ *        000 = i8[]
+ *        001 = i16[]
+ *        010 = i32[]
+ *        011 = i64[]
+ *        100 = f32[]
+ *        101 = f64[]
+ *        110 = any[]
+ *        111 = object[]
+ *   // 010 = callable
+ *        000 = CFunction
+ *        001 = Bytecode
+ *   // 011 = dict
  *   // 100 = 
  *   // 101 = 
- *   // 110 = extension
- *   // 111 = opaque
+ *   // 110 = 
+ *   // 111 = 
  *   struct other {
  *     uint head : 13 = 0;
  *     uint tag : 3;
- *     union {
- *       none = 0;
- *       empty = 10;
- *       false = 2;
- *       true = 6;
- *       
- *       GCObject* gco;
- *       const char* cstr; // NULL = empty string
- *       char32_t codepoint;
- *       char smallstr[6];
- *       void* opaque;
- *       Value(*extension)(Value, int, Value*);
- *     } payload : 48;
+ *     byte payload[] : 48;
  *   };
  * };
 **/
-struct Value {
+struct Value64 {
 	uintptr_t _value;
 	
-	inline Value proto() const {
-		if(isReal()) return real_proto;
-		if(isInt()) return int_proto;
-		if(isBool()) return bool_proto;
-		if(_value == ESP_NONE || _value == ESP_EMPTY) return ESP_NONE;
-		if(_value&1) {
-			return proto_int;
-		}
-		if(_value&2) {
-			return proto_bool;
-		}
+	enum class Tag {
+		SIMPLE = 0,
+		CHAR,
+		CSTRING,
+		INTERN,
+		RESERVED1,
+		RESERVED2,
+		EXTENSION,
+		OPAQUE,
 		
-		return asGCO()->proto();
-	}
-	
-	inline bool isNone() const noexcept {
-		return _value == ESP_NONE;
-	}
-	inline bool isEmpty() const noexcept {
-		return _value == ESP_EMPTY;
-	}
-	
-	inline operator bool() const noexcept {
-		return isBool()? asBool() : proto()->callMethod("bool");
-	}
-	
-	inline bool isBool() const {
-		return _value == ESP_TRUE || _value == ESP_FALSE;
-	}
-	inline bool asBool() const {
-		return _value&(ESP_TRUE^ESP_FALSE);
-	}
-	
-	inline bool isInt() const {
-		// Sign=1, Exp=0, Frac MSB=0 (signed inverted signaling NaN)
-		constexpr uint64_t ipre = 0x8008<<48, mask = 0xfff8<<48;
-		return (_value&mask) == ipre;
-	}
-	inline int64_t asInt() const {
-		return ((int64_t)((_value&((1<<51) - 1))<<13))>>13;
-	}
-	
-	inline bool isReal() const {
-		// NaN boxing is done by encoding the double bit inverted, and non-
-		//  double values have Exp=0 and Frac MSB=0 representing an
-		//  (inverted) signalling NaN. Sign bit not included in check
-		return !(_value&(0xfffL<<51));
-	}
-	inline double asReal() const {
-		union { uint64_t i; double f; };
-		i = ~_value;
-		return f;
-	}
+		NONE,
+		EMPTY,
+		FALSE,
+		TRUE,
+		FLOAT,
+		INT,
+		LONG,
+		
+	};
 
-	inline bool isPtr() const {
-		return !(_value&3);
-	}
-	
-	inline void* asPtr() {
-		return (void*)_value;
-	}
-	
-	inline GCObject* asGCO() {
-		return (GCObject*)asPtr();
-	}
-};
-#else
-// Live values are the same as heap values on 32-bit platforms
-using Value = HeapValue
-#endif
-
-/**
- * CRTP template for commonly reused methods.
- * 
- * Some accessor methods are defined with prefixes "is", "as", and "to".
- *  Respectively, these test the type, cast it while assuming the type is
- *  correct, and attempt to convert to the type.
-**/
-template<typename T>
-struct Handle {
 private:
-	uint64_t& _value {
-		return static_cast<T*>(this)->value();
+	
+	constexpr bool sign() const noexcept {
+		return _value>>63;
 	}
 	
-	const uint64_t& _value const {
-		return static_cast<const T*>(this)->value();
+	constexpr int head() const noexcept {
+		return (_value>>52)&0xfff;
 	}
 	
-	uint8_t _tag() {
-		return (_value>>48)&0xF;
+	constexpr int exponent() const noexcept {
+		return head()&0x7ff;
 	}
 	
-public:
-	bool isNone() const {
-		return _value == ESP_NONE;
+	constexpr int rawtag() const noexcept {
+		return (_value>>48)&0xf;
 	}
-	bool isEmpty() const {
-		return _value == ESP_EMPTY;
+	
+	constexpr uint64_t low52() const noexcept {
+		return _value&((1<<52) - 1);
 	}
-	bool isError() const {
-		return _value == ESP_ERROR;
+	
+	constexpr uint64_t low48() const noexcept {
+		return _value&((1<<48) - 1);
 	}
+
+public:	
+	constexpr Tag tag() const noexcept {
+		// Float has non-zero exponent field
+		if(exponent()) return Tag::FLOAT;
+		// Integer is signed signaling NaN
+		if(sign()) return Tag::INT;
+		// Everything else is unsigned signaling NaN
+		Tag t = static_cast<Tag>(rawtag());
+		// Check simple values
+		if(t == Tag::SIMPLE)
+			return static_cast<Tag>((_value&7) + (int)Tag::NONE);
+		return t;
+	}
+	
+	template<typename T>
+	constexpr bool is() const {}
+	
+	template<typename T>
+	constexpr T as() const {}
 	
 	operator bool() const {
-		return toBool();
-	}
-	
-	bool isBool() const {
-		auto& data = _value;
-		return data == ESP_TRUE || data == ESP_FALSE;
-	}
-	bool asBool() const {
-		return _value&(ESP_TRUE^ESP_FALSE);
-	}
-	bool toBool() const {
-		return proto().callMethod("bool");
-	}
-
-	bool isInt() const {
-		return _tag() == TAG_INT;
-	}
-	int64_t asInt() const {
-		// MSB = 1, sign extend by XNORing the sign bit with MSB
-		return data^((~data&(1L<<62))<<1);
-	}
-	int64_t toInt() const {
-		return proto().callMethod("int");
-	}
-
-	bool isReal() const {
-		return _tag() == TAG_REAL;
-	}
-	double asReal() const {
-		union {
-			uint64_t u;
-			double d;
-		};
-		u = ~data;
-		return d;
-	}
-	double toReal() const {
-		return proto().callMethod("real");
-	}
-
-	bool isSmallString() const {
-		return (((data>>49)&((1<<15) - 1)) == 1) && 
-	}
-
-	bool isCString() const;
-	const char* asCString() const;
-
-
-	bool isChar() const {
-		return _tag() == TAG_CHAR;
-	}
-	bool asChar() const {
-		return data&(ESP_TRUE^ESP_FALSE);
-	}
-	bool toChar() const {
-		return proto().callMethod("char");
-	}
-		
-	bool isCFunc() const;
-	esp_CFunc asCFunc() const;
-
-	bool isLeaf() const;
-	bool isImmutable() const;
-
-	//CONVERSION(Opaque);
-
-	bool isPtr() const;
-	GCObject* asPtr() const;
-	
-	Value proto() const {
-		if(isReal()) return &real_proto;
-		if(isInt()) return &int_proto;
-		if(isBool()) return &bool_proto;
-		if(isNone() || isEmpty()) return ESP_NONE;
-		
-		switch(_tag()) {
-			case TAG_CHAR: return &char_proto;
-			case TAG_STRING: return &string_proto;
-			case TAG_BYTES: return &bytes_proto;
-			case TAG_SYMBOL: return &symbol_proto;
+		switch(tag()) {
+			case Tag::NONE:
+			case Tag::EMPTY:
+				return false;
+			
+			case Tag::BOOL:
+				return _value == ESP_TRUE;
+			
+			case Tag::INT:
+				return _value << 1;
+			
+			case Tag::FLOAT:
+				return bit_cast<double>(~_value) == 0.0;
+			
+			case Tag::INTERN: // intern id 0 is the empty string
+			case Tag::CHAR: // \0 char
+				return _value>>3;
+			
+			// Non-interned string are always not-empty and so truthy
+			case Tag::STRING:
+			// 0 is always smi, so long is always truthy
+			case Tag::LONG:
+			// NULL pointers are none, not opaque
+			case Tag::OPAQUE:
+				return true;
+			
+			case Tag::DICT:
+				return as<Dict>().length();
+			
+			case Tag::OBJECT:
+				return as<Object>().to<bool>();
 		}
 	}
 };
+
+template<>
+constexpr bool Value64::is<void>() const noexcept {
+	return _value == ESP_NONE;
+}
+	
+template<>
+constexpr bool Value64::is<bool>() const noexcept {
+	Tag t = tag();
+	return t == Tag::TRUE || t == Tag::FALSE;
+}
+template<>
+constexpr bool Value64::as<bool>() const {
+	assert(is<bool>());
+	return _value&(ESP_TRUE^ESP_FALSE);
+}
+
+template<>
+constexpr bool Value64::is<int64_t>() const noexcept {
+	return tag() == Tag::INT;
+}
+template<>
+constexpr int64_t Value64::as<int64_t>() const {
+	assert(is<int64_t>());
+	// Sign extend
+	return (low52()<<12)/(1<<12);
+}
+
+template<>
+constexpr bool Value64::is<double>() const noexcept {
+	return tag() == Tag::FLOAT;
+}
+template<>
+constexpr bool Value64::is<float>() const noexcept {
+	return is<double>();
+}
+template<>
+constexpr double Value64::as<double>() const {
+	assert(is<double>());
+	return bit_cast<double>(~_value);
+}
+
+template<>
+constexpr bool Value64::is<char32_t>() const noexcept {
+	return tag() == Tag::CHAR;
+}
+template<>
+constexpr char32_t Value64::as<char32_t>() const {
+	assert(is<char32_t>());
+	return (char32_t)(low48()>>16);
+}
+
+template<>
+constexpr bool Value64::is<void*>() const noexcept {
+	return !head() && !(_value&3);
+}
+template<>
+constexpr void* Value64::as<void*>() const {
+	assert(is<void*>());
+	return (void*)_value;
+}
+
+template<>
+constexpr bool Value64::is<GCObject*>() const noexcept {
+	return false;
+}
+
+template<>
+constexpr bool Value64::is<const char*>() const noexcept {
+	return tag() == Tag::CSTRING;
+}
+template<>
+constexpr const char* Value64::as<const char*>() const {
+	assert(is<const char*>());
+	return (const char*)as<void*>();
+}
+
+template<typename T>
+using HeapPtr = CPtr<T>;
+using LiveValue = Value64;
+using HeapValue = Value32;
+
+#else
+
+template<typename T>
+using HeapPtr<T> = T*;
+using LiveValue = Value32;
+using HeapValue = Value32;
+
+#endif
+
+using Value = LiveValue;
+using CFunction = Value(*)(Value, int, Value(*)[]);
 
 /**
  * Handle which keeps values alive while they're only referred to in native
  *  code. These are kept as a pool in the GC acting as roots for mark and
  *  sweep.
 **/
-struct Var : Value {
+struct Var : public Value {
 	inline Var() {
 		gc.register_root(this);
 	}
@@ -426,72 +469,6 @@ struct Var : Value {
 	inline ~Var() {
 		gc.remove_root(this);
 	}
-};
-
-struct Builtin {
-	Dict* shape; // {"add": offsetof(add)} 26 ~ 64
-	Extension
-		add, sub, mul, div, mod, pow, idiv,
-		band, bor, bxor, lsh, ash, rsh,
-		lt, le, gt, ge, eq, ne, cmp,
-		call, get, set, del, has, init;
-};
-
-/**
- * Provides a way for native objects to be managed by the runtime.
-**/
-struct Userdata : public GCObject {
-	virtual ~Userdata() = default;
-};
-
-struct Real : public GCObject {
-	double value;
-};
-
-struct Int : public GCObject {
-	intmax_t value;
-};
-
-/**
- * Immutable text data with a known encoding (UTF-8)
- * 
- * http://www.utf8everywhere.org/
-**/
-struct String : public GCObject {
-	union {
-		struct {
-			hash_t hash;
-			uint32_t length;
-		};
-		uint64_t hashlen;
-	};
-	char8_t data[0];
-	
-	template<typename V>
-	void gc_visit(V& v) {}
-};
-
-/**
- * Immutable data with no specified encoding.
-**/
-struct Bytes : public GCObject {
-	size_t size;
-	uint8_t* data;
-	
-	template<typename V>
-	void gc_visit(V& v) {}
-};
-
-/**
- * Mutable byte-aligned data
-**/
-struct Buffer : public GCObject {
-	uint32_t size;
-	uint32_t capacity;
-	uint8_t* data;
-	
-	template<typename V>
-	void gc_visit(V& v) {}
 };
 
 /**
@@ -509,51 +486,51 @@ struct Buffer : public GCObject {
  *  entry ordering for free and simplifies iterator logic.
 **/
 
-/**
- * This isn't a GCObject because it's allocated within the structure of
- *  DictKeys.
-**/
-struct DictKeyEntry {
-	bool writable : 1; // Can the value change?
-	bool removable : 1; // Property can be deleted?
-	bool configurable : 1; // Can the property be configured?
-	bool ispublic : 1; // Property is public? (private requires this.*)
-	bool isoffset : 1; // Interpret value as an offset into slots?
-	bool accessor : 1; // Property is an accessor
+struct Dict : public GCObject {
+	struct Key {
+		bool writable : 1; // Can the value change?
+		bool removable : 1; // Property can be deleted?
+		bool configurable : 1; // Can the property be configured?
+		bool ispublic : 1; // Property is public? (private requires this.*)
+		bool isoffset : 1; // Interpret value as an offset into slots?
+		bool accessor : 1; // Property is an accessor
+		
+		HeapValue key;
+	};
 	
-	/*
-	private property - any possible value
-	public property - any possible value
-	
-	hash -> index
-	index -> entry (offset|value)
-	
-	
-	*/
-	
-	HeapValue key;
+	struct KeyValue : public Key {
+		HeapValue value;
+	};
 	
 	/**
-	 * Only allocated when the shape is extended
+	 * DictEntry doesn't allocate values unless the shape is extended
 	**/
-	HeapValue value[0];
-};
-
-struct DictKeys : public GCObject {
-	uint32_t usable; // Number of usable entries (not sync'd with used)
-	uint32_t used; // Number of used entries
+	union Entry {
+		Key key;
+		KeyValue key_value;
+	};
 	
-	uint8_t indices[0];
+	struct HashIndex : public GCObject {
+		uint16_t usable; // Number of usable entries (not sync'd with used)
+		uint16_t used; // Number of used entries
+		
+		// Width of indices determined by used
+		union {
+			uint8_t index8[0];
+			uint16_t index16[0];
+			uint32_t index32[0];
+			uint64_t index64[0];
+		};
+		
+		template<typename V>
+		void gc_visit(V& v) {}
+	};
 	
-	template<typename V>
-	void gc_visit(V& v) {}
-};
-
-struct Dict : public GCObject {
 	bool ownproto : 1; // Proto is an extension of the object's own properties
 	bool extended : 1; // Whether the dictionary stores values or offsets
-	Value proto;
-	DictKeys* keys;
+	HeapValue proto;
+	CPtr<HashIndex> index_map;
+	CPtr<Entry> entry_table;
 	
 	template<typename V>
 	void gc_visit(V& v) {
@@ -561,48 +538,6 @@ struct Dict : public GCObject {
 		v.visit(*keys);
 	}
 };
-
-/**
- * Immutable non-resizeable sequential type
-**/
-struct Tuple : public GCObject {
-	Value elems[0];
-	
-	template<typename V>
-	void gc_visit(V& v) {
-		for(int i = 0; i < length(); ++i) {
-			v.visit(elems[i]);
-		}
-	}
-};
-
-/**
- * Mutable non-resizeable sequential type
-**/
-struct Array : public GCObject {
-	Value elems[0];
-	
-	template<typename V>
-	void gc_visit(V& v) {
-		for(int i = 0; i < length(); ++i) {
-			v.visit(elems[i]);
-		}
-	}
-};
-
-/**
- * Mutable resizeable sequential type
-**/
-struct List : public GCObject {
-	Array* elems;
-	
-	template<typename V>
-	void gc_visit(V& v) {
-		v.visit(*elems);
-	}
-};
-
-/* Note: There is no immutable resizeable type */
 
 /**
  * Object represents structures not expected to change, with fields
@@ -622,15 +557,6 @@ struct Object : public GCObject {
 	}
 };
 
-struct UserObject : public GCObject {
-	struct Interface {
-		CFunction get;
-		CFunction set;
-		CFunction del;
-		CFunction def;
-	};
-};
-
 /**
  * Proto represents objects which are expected to be prototyped, so the
  *  relevant prototyping fields are stored explicitly rather than in the
@@ -642,121 +568,8 @@ struct Proto : public GCObject {
 	Value slots[0];
 };
 
-struct Accessor {
-	Value get, set, del;
-};
-
-struct Wrapped : public GCObject {
-	Dict* shape;
-	void* data;
-};
-
-/**
- * Using a JVM/C++ exception model, where IP regions and a corresponding
- *  IP for the handler.
-**/
-struct EHTableEntry {
-	uint16_t from, to, target;
-	bool save_trace;
-};
-static_assert(sizeof(EHTableEntry) == sizeof(void*));
-
-struct Function : public GCObject {
-	Tuple* ktab;
-	uint16_t codelen;
-	uint8_t code[0];
-	/**
-	 * EHTableEntry eh[]
-	**/
+struct DataPool {
 	
-	/**
-	 * Get the exception handler table
-	**/
-	constexpr const EHTableEntry* ehtab() const {
-		return (EHTableEntry*)&code[size2cell(codelen)];
-	}
-	
-	/**
-	 * Get the xth exception handler
-	**/
-	constexpr const EHTableEntry& eh(uint x) const {
-		assert(x < neh());
-		return ehtab()[x];
-	}
-	
-	/**
-	 * Get the number of exception handlers
-	**/
-	constexpr uint neh() const {
-		return ncells() - cell2size((GCObject*)ehtab() - (GCObject*)this);
-	}
-};
-
-struct Closure : public GCObject {
-	Function* func;
-	Value* upvals[0];
-	
-	constexpr int nup() const {
-		return ncells() - 2;
-	}
-};
-
-/**
- * General structure for storing function metadata, which is immutable
-**/
-struct FuncMeta {
-	String source;
-	int line, col;
-	String name;
-	String doc;
-	uint16_t param_count;
-	String param_doc;
-	Value defaults;
-};
-
-// NativeFunction is only ever created by the host program
-struct NativeFunction {
-	enum Flag {
-		USE_THIS,
-		PASS_ARRAY,
-		STDCALL,
-		CDECL,
-		FASTCALL,
-		THISCALL,
-		IGNORE_BADTYPE, // use default constructor for bad types
-		THROW_BADTYPE, // throw an error for bad types
-		IS_VM
-	} flags;
-	FuncMeta meta;
-	
-	// Generally follows Python struct packing, but doesn't support
-	//  endianness or type repetition and adds support for substructures
-	const char* signature;
-	/*
-		' ' = skip
-		'x' = pad
-		"?" = bool
-		'c' = char
-		'b' = int8
-		"B" = uint8
-		'h' = int16
-		"H" = uint16
-		'i' = int32
-		"I" = uint32
-		'q' = int64
-		"Q" = uint64
-		'n' = ssize_t
-		"N" = size_t
-		'f' = float
-		"d" = double
-		's' = string
-		'v' = Value
-		'p' = buffer
-		'P' = void*
-		'{' = begin struct
-		'}' = end struct
-	*/
-	void* impl;
 };
 
 #endif

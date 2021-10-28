@@ -1,0 +1,11 @@
+function howmany(x) {
+	"\{x || 'no more'} bottle\{'s'*(x != 1)} of beer"
+}
+
+var x = 99;
+while(x) {
+	print("\{howmany(x)} on the wall\n");
+	print("\{howmany(x)}.\n");
+	print("Take one down, pass it around,\n");
+	print("\{howmany(x = x - 1)} on the wall.\n\n")
+}

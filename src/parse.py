@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
 import re
-from ast import Value, Op, Var, Block, Prog, Func, Assign, Tuple, Call, Index, Branch, Loop, If, Switch, Case, Import
-from runtime import EspString, EspNone
+from ast import Value, Op, Var, Block, Prog, Func, Assign, Tuple, Call, Index, Branch, Loop, If, Switch, Case, Import, Proto, ObjectLiteral, ForLoop, Format
+from runtime import EspString, EspNone, EspDict
 
 class ParseError(RuntimeError):
 	def __init__(self, msg, pre, p, l, c):
@@ -27,14 +27,13 @@ PATS = {
 	"dq3": r'"""(?:\\.|.+?)*?"""',
 	"bq3": r"```(?:\\.|.+?)*?```",
 	"id": r"[\w][\w\d]*",
-	"punc": r"[()\[\]{}]",
+	"punc": r"[()\[\]{}]|\.{1,3}",
 	"op": "|".join([ # Ops can be contextual identifiers, puncs can't
-		r"[()\[\]{}]",
 		r"[@~;,?]",
 		r"[-=]>", r":=",
-		r"(?P<d>[-+*/%&|^:])(?P=d)?",
-		r"[<>.]{1,3}",
-		r"={1,3}", r"!={,2}", r"[<>]=?"
+		r"={1,3}", r"!={,2}", r"[<>]=?",
+		r"(?P<d>[-+*/%&|^:!])(?P=d)?",
+		r"<<[<>]|<>|[<>]>>"
 	])
 }
 # Operators which can't be overloaded because they encode syntax
@@ -61,11 +60,11 @@ RIGHT = [
 ]
 
 KW = [
-	"if", "then", "else", "loop", "while", "do",
+	"if", "then", "else", "loop", "while", "do", "for",
 	"with", "switch", "case", "try", "finally",
 	"return", "yield", "fail", "await", "break", "continue", "redo"
 	"var", "const", "proto", "struct", "function",
-	"async", "strict", "public", "private", "static",
+	"async", "strict", "public", "private", "static", "var", "const"
 	"this", "super", "none", "inf", "nan",
 	"new", "delete", "in", "is", "as", "has"
 ]
@@ -85,9 +84,6 @@ NEWLINE = re.compile("\n")
 SPACE = re.compile(r"\s+", re.M)
 WORD = re.compile(r'\S+')
 
-print(TOKEN.pattern)
-print(NAMES)
-
 class Token:
 	def __init__(self, v, t, p, l, c):
 		self.value = v
@@ -106,7 +102,7 @@ def semiAsExpr(cur, block):
 	Convert a list of expressions to a single expression, possibly a Block
 	'''
 	if len(block) == 0:
-		return Value(EspNone)
+		return Value(cur, EspNone)
 	elif len(block) == 1:
 		return block[0]
 	else:
@@ -247,6 +243,8 @@ class Lexer:
 			val = EspString(tok[3:-3])
 		elif tt == "op":
 			val = tok
+		elif tt == "punc":
+			val = tok
 		else:
 			raise self.error(f"Unimplemented token {tt}:{tok}")
 		
@@ -271,21 +269,37 @@ class Lexer:
 					self.cur.assign = True
 					self.la = None
 		
+		if self.cur and self.cur.value == "=":
+			self.cur.assign = True
+		
 		return self.cur
 	
 	def peek(self, value=None, type=None):
-		'''Peek at the next token without consuming it'''
+		'''
+		Peek at the next token without consuming it, returning the token or None
+		'''
 		
 		if self.cur is None:
-			return False
+			return None
 		
 		if value:
-			return self.cur.value == value
+			if value.__class__ is set:
+				if self.cur.value in value:
+					return self.cur
+			else:
+				if self.cur.value == value:
+					return self.cur
 		else:
-			return self.cur.type == type
+			if self.cur.type == type:
+				return self.cur
+		
+		return None
 	
 	def maybe(self, value=None, type=None):
-		'''Consume the next token if it matches the string'''
+		'''
+		Consume the next token if it matches the string, returning the token,
+		else return None
+		'''
 		
 		v = self.peek(value, type)
 		if v:
@@ -295,11 +309,13 @@ class Lexer:
 	def expect(self, value=None, type=None):
 		'''Next token must be the string or it errors'''
 		
-		if not self.maybe(value, type):
+		m = self.maybe(value, type)
+		if m is None:
 			raise self.expected(value or type)
+		return m
 	
-	def expected(self, what):
-		return self.error("Expected " + what)
+	def expected(self, tok, what):
+		return self.error(tok, "Expected " + what)
 
 class Parser(Lexer):
 	def __init__(self, src):
@@ -316,6 +332,9 @@ class Parser(Lexer):
 		'''Ensure the next element is an l-value'''
 		
 		x = self.atom()
+		if x is None:
+			return None
+		
 		if x.lvalue:
 			return x
 		else:
@@ -332,28 +351,312 @@ class Parser(Lexer):
 		ct = cur.type
 		
 		if ct in {"str", "id", "op"}:
-			return self.cur
+			cur.type = "str"
+			self.consume()
+			return cur
 		else:
-			raise self.expected(self.cur, "relaxed identifier")
+			x = self.atom()
+			if x: return x
+			raise self.expected(cur, "relaxed identifier")
+	
+	def varlist(self):
+		'''
+		Parses a list of variables, possibly with defaults and unpacking
+		'''
+		
+		vl = []
+		
+		while True:
+			name = self.lvalue()
+			
+			# Todo: Type annotation using :
+			
+			tok = self.maybe("=")
+			if tok:
+				name = Assign(tok, name, self.expr())
+			
+			vl.append(name)
+			
+			if not self.maybe(","):
+				break
+		
+		return vl
+	
+	def commalist(self, pat):
+		v = []
+		x = pat()
+		while x:
+			v.append(x)
+			if not self.maybe(","):
+				break
+			
+			x = pat()
+		
+		return v
+	
+	def qualifier(self):
+		return self.maybe({"var", "const"})
+	
+	def funcargs(self):
+		args = self.lvalue()
+		if type(args) is Tuple:
+			return args.elems
+		else:
+			return [args]
+	
+	def parse_objectliteral(self, cur):
+		obj = []
+		
+		if self.maybe("}"):
+			return Value(cur, EspDict())
+		
+		while not self.maybe("}"):
+			tok = self.cur
+			if tok.type in {"val", "id", "op"}:
+				key = Value(tok, tok.value)
+			elif tok.type == "kw":
+				if tok.value in {"get", "set"}:
+					raise NotImplementedError("get/set")
+				key = Value(tok.value)
+			elif tok.type == "punc":
+				if tok.value == "[":
+					raise NotImplementedError("Computed properties")
+				raise self.error(tok, "Unexpected punctuation")
+			else:
+				raise self.error(tok, f"Unknown token {tok!r}")
+			
+			self.consume()
+			
+			if self.peek("("):
+				# Object method
+				functok = self.cur
+				args = self.funcargs()
+				value = Func(functok, key, args, self.block())
+			elif self.maybe(":"):
+				# Normal property
+				value = self.expr()
+			else:
+				# NOTE: Doesn't work for computed properties
+				value = Var(key.value)
+			
+			obj.append((key, value))
+			
+			# Should commas be optional?
+			self.maybe(",")
+		
+		return ObjectLiteral(cur, obj)
+	
+	def parse_proto(self, cur):
+		# TODO: anonymous proto
+		
+		name = self.maybe(type="id")
+		
+		if self.maybe("is"):
+			parent = self.ident()
+		else:
+			parent = None
+		
+		self.expect("{")
+		
+		pub = []
+		priv = []
+		stat = []
+		
+		while not self.maybe("}"):
+			qual = self.maybe({"public", "var", "private", "static"})
+			mem = self.maybe(type="id")
+			
+			if self.maybe("("):
+				params = self.commalist(self.lvalue)
+				self.expect(")")
+				
+				body = self.block()
+				
+				members = [Func(mem, mem.value, params, body)]
+			else:
+				members = [Var(mem, mem.value)]
+				
+				while self.maybe(","):
+					mem = self.maybe(type="id")
+					if mem is None:
+						raise RuntimeError("None name")
+					
+					members.append(Var(mem, mem.value))
+			
+			if not qual or qual.value in {"public", "var"}:
+				pub += members
+			elif qual.value == "private":
+				priv += members
+			elif qual.value == "static":
+				stat += members
+			else:
+				raise RuntimeError("Shouldn't happen")
+			
+			while self.maybe(";"): pass
+		
+		name = name.value if name else None
+		
+		p = Proto(cur, name, parent, pub, priv, stat)
+		
+		if name is None:
+			return p
+		else:
+			v = Var(cur, name, mutable=False)
+			self.addVar(v)
+			return Assign(cur, v, p)
+	
+	def maybe_while(self):
+		cond = self.expr()
+		bl = self.block()
+		
+		th, el = self.then_else()
+		
+		return cond, bl, th, el
+	
+	def parse_switch(self, cur):
+		swtok = cur
+		
+		ex = self.expr()
+		
+		# List of cases clauses which will be linked after the
+		#  parsing stage
+		cs = []
+		
+		# Then, else, and default
+		th = el = de = None
+		
+		# First, collect all the cases as separate blocks
+		
+		self.expect("{")
+		while not self.maybe("}"):
+			# Token of the case/else
+			cur = self.cur
+			
+			# case or else clause?
+			
+			if self.maybe("case"):
+				op = "in" if self.maybe("in") else "="
+				val = self.expr()
+			elif self.maybe("else"):
+				op = "else"
+				val = None
+			else:
+				raise self.expected("case or else")
+			
+			# Immediate or fallthrough?
+			
+			if self.maybe("=>"): ln = None
+			elif self.maybe(":"): ln = True
+			else:
+				raise self.expected(": or =>")
+			
+			# Block of the clause
+			
+			bl = self.block()
+			c = Case(cur, op, val, bl, ln)
+			if op == "else":
+				if de:
+					raise self.error("Duplicate else case")
+				de = c
+			
+			cs.append(c)
+		
+		# Process follow up blocks
+		
+		cur = self.cur
+		if self.maybe("then"):
+			th = Case(cur, "then", None, self.block(), None)
+		
+		cur = self.cur
+		if self.maybe("else"):
+			el = Case(cur, "else", None, self.block(), None)
+		
+		# Link adjacent fallthrough blocks together
+		
+		update = None
+		
+		for case in cs:
+			if update:
+				update.next = case
+			
+			update = None
+			if case.next:
+				update = case
+		
+		# Remove else-case from the case list
+		if de in cs:
+			cs.remove(de)
+		
+		return Switch(swtok, ex, cs, de, th, el)
+	
+	def then_else(self):
+		th = el = Value(None, EspNone)
+		
+		if self.maybe("then"):
+			th = self.block()
+		if self.maybe("else"):
+			el = self.block()
+		
+		return th, el
+	
+	def process_string(self, cur):
+		val = cur.value
+		
+		# Lazy hack, there are edge cases where this would be incorrect
+		val = val.replace("\\n", "\n").replace("\\t", "\t")
+		
+		# Scan for format strings
+		parts = []
+		scan = val
+		upto = 0
+		while True:
+			x = scan.find("\\{", upto)
+			if x != -1:
+				y = scan.find("}", x)
+				if upto != x:
+					parts.append(scan[upto:x])
+				sp = Parser(scan[x + 2:y]).parse()
+				parts.append(Block(cur, sp.elems, sp.vars))
+				upto = y + 1
+			else:
+				break
+		
+		if upto < len(val):
+			parts.append(val[upto:])
+		
+		if len(parts) == 1:
+			return Value(cur, parts[0])
+		else:
+			return Format(cur, parts)
 	
 	def atom(self):
 		if self.cur is None:
 			return None
 		
-		# Exceptions which shouldn't be consumed
 		cur = self.cur
 		val = cur.value
 		ct = cur.type
 		
-		if val in {")", ";", "}"}:
+		# Exceptions which shouldn't be consumed
+		if val in {")", ";", "}", "case", "else"}:
 			return None
 		
 		self.consume()
 		
 		if ct == "val":
-			return Value(cur)
+			return Value(cur, cur.value)
+		elif ct == "str":
+			return self.process_string(cur)
+		
 		elif ct == "id":
-			return Var(cur)
+			v = Var(cur, cur.value)
+			
+			# Check string call
+			s = self.maybe(type="str")
+			if s:
+				return Call(s, v, [self.process_string(s)])
+			
+			return v
 		elif ct == "punc":
 			if val == "(":
 				if self.maybe(")"):
@@ -362,8 +665,11 @@ class Parser(Lexer):
 				x = self.semichain()
 				self.expect(")")
 				return semiAsExpr(cur, x)
+			elif val == "{":
+				return self.parse_objectliteral(cur)
 			#elif val == ")": pass
 			#elif val == "}": pass
+			# TODO: dot functions
 			else:
 				raise NotImplementedError(val)
 		elif ct == "op":
@@ -380,13 +686,6 @@ class Parser(Lexer):
 				
 				return If(cur, cond, th, el)
 			
-			elif val == "else":
-				'''
-				Else cannot appear on its own, but it isn't an error
-				to encounter it while parsing an atom - this can
-				happen while parsing the then block
-				'''
-				return None
 			elif val == "none":
 				return Value(cur, EspNone)
 			elif val == "inf":
@@ -394,121 +693,53 @@ class Parser(Lexer):
 			elif val == "nan":
 				return Value(cur, float('nan'))
 			elif val == "proto":
-				if self.maybe("is") or self.peek("{"):
-					name = None
-				else:
-					name = self.ident()
+				return self.parse_proto(cur)
+				
 			elif val == "import":
 				return Import(cur, self.expr())
 			elif val == "loop":
-				bl = self.block()
+				always = self.block()
+				
 				if self.maybe("while"):
-					cond = self.expr()
-					bl = self.block()
+					cond, bl, th, el = self.maybe_while()
 					
-					th = el = Value(EspNone)
-					if self.maybe("then"):
-						th = self.block()
-					if self.maybe("else"):
-						el = self.block()
-					
-					return Loop(cur, Block([
-						bl, If(cond, bl, th)
+					return Loop(cur, Block(cur, [
+						always, If(cond, bl, th)
 					]), el=el)
+				else:
+					return Loop(cur, always)
+				
 			elif val == "while":
-				cond = self.expr()
-				bl = self.block()
+				cond, bl, th, el = self.maybe_while()
 				
-				th = el = Value(EspNone)
-				if self.maybe("then"):
-					th = self.block()
-				if self.maybe("else"):
-					el = self.block()
-				
-				return Loop(cur, Block([
-					If(cond, bl, th)
+				# Not account for el
+				return Loop(cur, Block(cur, [
+					If(cur, cond, bl, Branch(cur, "break"))
 				]), el=el)
+			
+			elif val == "for":
+				self.expect("(")
+				qual = self.qualifier()
+				itvar = self.lvalue()
+				self.expect("in")
+				toiter = self.expr()
+				self.expect(")")
+				body = self.block()
+				
+				it = Var(cur, "$it")
+				
+				th, el = self.then_else()
+				
+				# TODO: n is a generalized lvalue, not a Var
+				return ForLoop(cur, itvar, toiter, body, th, el)
+			
 			elif val == "switch":
-				swtok = cur
-				
-				ex = self.expr()
-				
-				# List of cases clauses which will be linked after the
-				#  parsing stage
-				cs = []
-				
-				# Then, else, and default
-				th = el = de = None
-				
-				# First, collect all the cases as separate blocks
-				
-				self.expect("{")
-				while not self.maybe("}"):
-					# Token of the case/else
-					cur = self.cur
-					
-					# case or else clause?
-					
-					if self.maybe("case"):
-						op = "in" if self.maybe("in") else "="
-						val = self.expr()
-					elif self.maybe("else"):
-						op = "else"
-						val = None
-					else:
-						raise self.expected("case or else")
-					
-					# Immediate or fallthrough?
-					
-					if self.maybe("=>"): ln = None
-					elif self.maybe(":"): ln = True
-					else:
-						raise self.expected(": or =>")
-		 			
-					# Block of the clause
-					
-					bl = self.block()
-					c = Case(cur, op, val, bl, ln)
-					if op == "else":
-						if de:
-							raise self.error("Duplicate else case")
-						de = c
-					
-					cs.append(c)
-				
-				# Process follow up blocks
-				
-				cur = self.cur
-				if self.maybe("then"):
-					th = Case(cur, "then", None, self.block(), None)
-				
-				cur = self.cur
-				if self.maybe("else"):
-					el = Case(cur, "else", None, self.block(), None)
-				
-				# Link adjacent fallthrough blocks together
-				
-				update = None
-				
-				for case in cs:
-					if update:
-						update.next = case
-					
-					update = None
-					if case.next:
-						update = case
-				
-				# Remove else-case from the case list
-				if de in cs:
-					cs.remove(de)
-				
-				return Switch(swtok, ex, cs, de, th, el)
-				
-			elif val == "case":
-				return None
+				return self.parse_switch(cur)
+			
 			elif val in {"break", "continue", "redo"}:
 				return Branch(cur, val)
 				# Todo: targeted branches
+			
 			elif val in {"var", "const"}:
 				'''
 				Var declarations are split into two separate concerns,
@@ -522,49 +753,60 @@ class Parser(Lexer):
 				
 				group = []
 				while True:
-					self.expectType("id")
-					name = self.cur.value
-					self.consume()
+					name = self.expect(type="id")
 					
-					self.addVar(Var(cur, name, mut))
+					v = Var(cur, name.value, mut)
+					self.addVar(v)
 					
 					if self.maybe("="):
 						x = self.expr()
 						if x is None:
 							raise self.expected("expression")
 						
-						group.append(Assign(None, Var(None, name), x))
+						group.append(Assign(cur, v, x))
 					
 					if not self.maybe(","):
 						break
-				print("group", group)
 				return semiAsExpr(cur, group)
+			
 			elif val == "function":
 				name = None
 				if self.cur.type == "id":
 					name = self.cur.value
 					self.consume()
 				
-				args = self.lvalue()
-				if type(args) is Tuple:
-					args = args.elems
-				else:
-					args = [args]
+				args = self.funcargs()
 				
 				block = self.block()
 				func = Func(cur, name, args, block)
 				
 				if name:
 					self.addVar(name)
-					return Assign(Var(None, name), func)
+					return Assign(cur, Var(cur, name), func)
 				else:
 					return func
+			
 			elif val == "try":
 				raise NotImplementedError("try")
+			
 			else:
 				raise self.error("Unimplemented keyword " + val)
 		
 		raise self.error("Unknown token " + val)
+	
+	def atom2(self):
+		'''Second-order atom parsing''' 
+		
+		lhs = self.atom()
+		
+		while True:
+			dot = self.maybe(".")
+			if not dot: break
+			
+			rhs = self.ident()
+			lhs = Index(dot, lhs, [Value(rhs, rhs.value)])
+		
+		return lhs
 	
 	def block(self):
 		'''
@@ -604,20 +846,21 @@ class Parser(Lexer):
 		Uses precedence climbing
 		'''
 		
-		lhs = self.atom()
+		lhs = self.atom2()
 		
 		while self.cur is not None:
 			cur = self.cur
 			op = cur.value
 			
 			if op == "(":
+				self.consume()
 				args = []
 				while True:
 					args.append(self.expr(PRECS[','] + 1))
 					
 					if not self.maybe(","):
 						break
-				
+				self.expect(")")
 				lhs = Call(cur, lhs, args)
 				continue
 			
@@ -648,13 +891,15 @@ class Parser(Lexer):
 			rhs = self.expr(next_min_prec)
 			
 			if assign:
-				lhs = Assign(cur, lhs, rhs, op)
+				lhs = Assign(cur, lhs, rhs, op if op != "=" else None)
 			else:
 				if op == ",":
 					if type(lhs) is Tuple:
 						lhs.append(rhs)
 					else:
-						lhs = Tuple(None, lhs, rhs)
+						lhs = Tuple(None, [lhs, rhs])
+				elif op == ".":
+					lhs = Index(cur, lhs, [rhs])
 				else:
 					lhs = Op(cur, lhs, rhs)
 		

@@ -18,8 +18,10 @@ def sexp(*v):
 				yield f"[{' '.join(str(e) for e in x)}]"
 			elif isinstance(x, Expr):
 				yield str(x)
+			elif type(x) is int:
+				yield str(x)
 			else:
-				raise TypeError("Unknown value in sexp " + str(x))
+				raise TypeError(f"Unknown value in sexp {x}")
 	
 	if v:
 		x = 0
@@ -36,6 +38,10 @@ def sexp(*v):
 
 class Expr:
 	def __init__(self, token):
+		# Sanity check
+		if token is not None and type(token).__name__ != "Token":
+			raise TypeError(f"Forgot origin token for {type(self).__name__} got {type(token)}")
+		
 		self.token = token
 		self.lvalue = True
 		self.rvalue = True
@@ -44,10 +50,17 @@ class Expr:
 		return f"<noimpl {type(self).__name__}.__str__>"
 	
 	def visit(self, v):
-		return getattr(v, "visit_" + type(self).__name__.lower())(self)
+		return getattr(v, f"visit_{type(self).__name__.lower()}")(self)
+
+class Statement(Expr):
+	'''
+	Expressions which don't automatically return if they're the last in a
+	 function body.
+	'''
+	pass
 
 class Value(Expr):
-	'''Valueant'''
+	'''Value'''
 	
 	def __init__(self, token, value=...):
 		super().__init__(token)
@@ -63,15 +76,21 @@ class Value(Expr):
 class Var(Expr):
 	'''Variable'''
 	
-	def __init__(self, token, mutable=True):
+	def __init__(self, token, name,  mutable=True):
 		super().__init__(token)
-		self.name = token.value
+		
+		if name and type(name) != str:
+			raise TypeError(f"Var name must be str, got {type(name)}")
+		
+		self.name = name
 		self.mutable = mutable
 	
 	def __str__(self):
-		return self.name + ("!" * self.mutable)
+		return f"{self.name}{'!' * self.mutable}"
 	
 	def __repr__(self):
+		if self.mutable:
+			return f"Var({self.name!r})"
 		return f"Var({self.name!r}, mutable={self.mutable!r})"
 
 class Spread(Expr):
@@ -89,7 +108,7 @@ class Spread(Expr):
 	def __repr__(self):
 		return f"Spread({self.var!r})"
 
-class Assign(Expr):
+class Assign(Statement):
 	'''Assignment is syntactic too'''
 	
 	def __init__(self, token, name, value, op=""):
@@ -99,10 +118,13 @@ class Assign(Expr):
 		self.op = op
 	
 	def __str__(self):
-		return sexp(self.op + "=", self.name, self.value)
+		return sexp(f"{self.op or ''}=", self.name, self.value)
 	
 	def __repr__(self):
-		return f"Assign({self.name!r}, {self.value!r}, {self.op!r})"
+		if self.op:
+			return f"Assign({self.name!r}, {self.value!r}, {self.op!r})"
+		else:
+			return f"Assign({self.name!r}, {self.value!r})"
 
 class Tuple(Expr):
 	'''Tuple'''
@@ -139,21 +161,21 @@ class Call(Expr):
 class Index(Expr):
 	'''Index a value'''
 	
-	def __init__(self, token, obj, keys):
+	def __init__(self, token, obj, indices):
 		super().__init__(token)
 		self.obj = obj
-		self.keys = keys
+		self.indices = indices
 	
 	def __str__(self):
-		return sexp(".", self.obj, [*self.keys])
+		return sexp(".", self.obj, [*self.indices])
 	
 	def __repr__(self):
-		return f"Index({self.obj!r}, {self.keys!r})"
+		return f"Index({self.obj!r}, {self.indices!r})"
 
-class Loop(Expr):
+class Loop(Statement):
 	'''All loop types simplify to this node, an infinite loop'''
 	
-	def __init__(self, token, body, el=Value(EspNone)):
+	def __init__(self, token, body, el=Value(None, EspNone)):
 		super().__init__(token)
 		self.body = body
 		self.el = el
@@ -164,7 +186,7 @@ class Loop(Expr):
 	def __repr__(self):
 		return f"Loop({self.body!r}, {self.el!r})"
 
-class If(Expr):
+class If(Statement):
 	'''if statement'''
 	
 	def __init__(self, token, cond, th, el):
@@ -183,7 +205,7 @@ class If(Expr):
 	def __repr__(self):
 		return f"If({self.cond!r}, {self.th!r}, {self.el!r})"
 
-class Branch(Expr):
+class Branch(Statement):
 	'''Base class for branching in blocks'''
 	
 	def __init__(self, token, kind, level=0):
@@ -241,7 +263,7 @@ class Import(Expr):
 class Proto(Expr):
 	'''Proto expression'''
 	
-	def __init__(self, token, name, parent, pub, priv, stat, methods):
+	def __init__(self, token, name, parent, pub, priv, stat):
 		super().__init__(token)
 		
 		self.name = name
@@ -249,7 +271,6 @@ class Proto(Expr):
 		self.pub = pub
 		self.priv = priv
 		self.stat = stat
-		self.methods = methods
 	
 	def __str__(self):
 		return sexp("proto",
@@ -259,8 +280,11 @@ class Proto(Expr):
 			self.priv and ("private", self.priv),
 			self.stat and ("static", self.stat)
 		)
+	
+	def __repr__(self):
+		return f"Proto({self.name!r}, {self.parent!r}, {self.pub!r}, {self.priv!r}, {self.stat!r})"
 
-class Return(Expr):
+class Return(Statement):
 	'''Return statement'''
 	
 	def __init__(self, token, value):
@@ -272,6 +296,19 @@ class Return(Expr):
 	
 	def __repr__(self):
 		return f"Return({self.value!r})"
+
+class Format(Expr):
+	'''Formatted string expression'''
+	
+	def __init__(self, token, parts):
+		super().__init__(token)
+		self.parts = parts
+	
+	def __str__(self):
+		return sexp("format", *(repr(x) if type(x) is str else x for x in self.parts))
+	
+	def __repr__(self):
+		return f"Format({self.parts!r})"
 
 class Case:
 	def __init__(self, token, op, value, body, next):
@@ -318,7 +355,48 @@ class Switch(Expr):
 	def __repr__(self):
 		return f"Switch({self.ex!r}, {self.cs!r}, {self.de!r}, {self.th!r}, {self.el!r})"
 
-class Block(Expr):
+class ObjectLiteral(Expr):
+	'''Object literal AST'''
+	
+	def __init__(self, token, obj):
+		super().__init__(token)
+		self.values = obj
+	
+	def __str__(self):
+		return sexp("object",
+			*(("pair", k, v) for k, v in self.values)
+		)
+	
+	def __repr__(self):
+		return f"ObjectLiteral({self.values!r})"
+
+class ForLoop(Statement):
+	'''
+	Representing for loops with Loop ends up being too complicated
+	'''
+	
+	def __init__(self, token, itvar, toiter, body, th, el):
+		super().__init__(token)
+		
+		self.itvar = itvar
+		self.toiter = toiter
+		self.body = body
+		self.th = th
+		self.el = el
+	
+	def __str__(self):
+		return sexp("for",
+			("var", self.itvar),
+			("in", self.toiter),
+			("body", self.body),
+			self.th and ("then", self.th),
+			self.el and ("else", self.el)
+		)
+	
+	def __repr__(self):
+		return f"ForLoop({self.itvar!r}, {self.toiter!r}, {self.body!r}, {self.th!r}, {self.el!r})"
+
+class Block(Statement):
 	'''Sequence of expressions evaluating to the last'''
 	
 	def __init__(self, token, elems, vars=None):
