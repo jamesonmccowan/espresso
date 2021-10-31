@@ -1,4 +1,4 @@
-for(var i in 0 .. 100) {
+for(var i in 0..100) {
 	print(i, ' ')
 	if(i%2 == 0) {
 		print("fizz");

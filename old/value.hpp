@@ -147,14 +147,27 @@ constexpr void* Value32::as<void*>() const {
 	#endif
 }
 
-template<typename T, typename F>
-constexpr T bit_cast(F from) {
-	union {
-		F f = from;
-		T t;
-	} u;
-	return u.t;
+#if __cplusplus <= 201703L
+// Definition copied from https://en.cppreference.com/w/cpp/numeric/bit_cast
+template <class To, class From>
+typename std::enable_if_t<
+    sizeof(To) == sizeof(From) &&
+    std::is_trivially_copyable_v<From> &&
+    std::is_trivially_copyable_v<To>,
+    To>
+// constexpr support needs compiler magic
+bit_cast(const From& src) noexcept
+{
+    static_assert(std::is_trivially_constructible_v<To>,
+        "This implementation additionally requires destination type to be trivially constructible");
+ 
+    To dst;
+    std::memcpy(&dst, &src, sizeof(To));
+    return dst;
 }
+#else
+	using std::bit_cast;
+#endif
 
 #if ESP_BITS == 64
 /**

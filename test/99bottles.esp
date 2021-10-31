@@ -1,5 +1,5 @@
 function howmany(x) {
-	"\{x || 'no more'} bottle\{'s'*(x != 1)} of beer"
+	"\{x or 'no more'} bottle\{'s'*(x != 1)} of beer"
 }
 
 var x = 99;

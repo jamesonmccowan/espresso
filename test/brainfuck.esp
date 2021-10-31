@@ -1,0 +1,26 @@
+# Hello world in BF
+var src = "--[+++++++<---->>-->+>+>+<<<<]<.>++++[-<++++>>->--<<]>>-.>--..>+.<<<.<<-.>>+>->>.+++[.<]";
+
+var pc = 0, dp = 0, stack = [], data = [0]*1024;
+
+while(pc < src.length) {
+	switch(src[pc++]) {
+		case "<" => {
+			if(dp == 0) {
+				data.push_front(0);
+			}
+			else --dp;
+		}
+		case ">" => {
+			if(dp > data.length) {
+				data.push(0);
+			}
+			++dp;
+		}
+		case "+" => ++data[dp];
+		case '-' => --data[dp];
+		case '.' => print(char(data[dp]));
+		case "[" => stack.push(pc);
+		case "]" => pc = stack.pop();
+	}
+}

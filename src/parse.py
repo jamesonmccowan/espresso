@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 
 import re
-from ast import Value, Op, Var, Block, Prog, Func, Assign, Tuple, Call, Index, Branch, Loop, If, Switch, Case, Import, Proto, ObjectLiteral, ForLoop, Format
-from runtime import EspString, EspNone, EspDict
+#from ast import Value, Op, Var, Block, Prog, Func, Assign, Tuple, Call, Index, Branch, Loop, If, Switch, Case, Import, Proto, ObjectLiteral, ForLoop, Format, ListLiteral
+import ast
+from typing import *
+from runtime import EspString, EspNone, EspDict, EspList
+
+import warnings
 
 class ParseError(RuntimeError):
 	def __init__(self, msg, pre, p, l, c):
@@ -12,13 +16,31 @@ class ParseError(RuntimeError):
 		self.line = l
 		self.col = c
 
-DEC = re.compile(r"\d([\d_]*\d)?")
+KW = [
+	"if", "then", "else", "loop", "while", "do", "for",
+	"with", "switch", "case", "try", "finally",
+	"return", "yield", "fail", "await", "break", "continue", "redo"
+	"var", "const", "proto", "struct", "function",
+	"async", "strict", "public", "private", "static", "var", "const"
+	"this", "super", "none", "inf", "nan",
+	"new", "delete", "in", "is", "as", "has",
+	
+	"and", "or", "not", "xor"
+]
+
+KWALIASES = {
+	"or": "||",
+	"and": "&&",
+	"not": "!",
+	"xor": "^"
+}
+
 # Token regex, organized to allow them to be indexed by name
 PATS = {
 	"bin": r"0b[_01]*[01]",
 	"oct": r"0o[_0-7]*[0-7]",
 	"hex": r"0x[_\da-fA-F]*[\da-fA-F]",
-	"flt": r"(?:\.\d[_\d]*|\d[_\d]*\.(?:\d[_\d]*)?)(?:e[-+]\d[_\d]*)?",
+	"flt": r"(?:\.\d[_\d]*|\d[_\d]*\.(?!\.)(?:\d[_\d]*)?)(?:e[-+]\d[_\d]*)?",
 	"dec": r"\d+",
 	"sq": r"'(?:\\.|.+?)*?'",
 	"dq": r'"(?:\\.|.+?)*?"',
@@ -26,22 +48,25 @@ PATS = {
 	"sq3": r"'''(?:\\.|.+?)*?'''",
 	"dq3": r'"""(?:\\.|.+?)*?"""',
 	"bq3": r"```(?:\\.|.+?)*?```",
+	"kw": "|".join(KW),
 	"id": r"[\w][\w\d]*",
 	"punc": r"[()\[\]{}]|\.{1,3}",
 	"op": "|".join([ # Ops can be contextual identifiers, puncs can't
-		r"[@~;,?]",
-		r"[-=]>", r":=",
-		r"={1,3}", r"!={,2}", r"[<>]=?",
-		r"(?P<d>[-+*/%&|^:!])(?P=d)?",
-		r"<<[<>]|<>|[<>]>>"
+		r"[@~;,?]", # Misc syntax
+		r"[-=]>", # Arrows
+		r"(?P<d0>[-+*/%&|^:])(?P=d0)?=", # Assignment ops
+		r"={1,3}", r"!={,2}", r"[<>]=?", # Comparison ops
+		r"(?P<d1>[-+*/%&|^:!])(?P=d1)?", # Arithmetic and logical
+		r"<<[<>]|<>|[<>]>>" # Shifts
 	])
 }
 # Operators which can't be overloaded because they encode syntax
-SYNTACTIC = [
-	",", "=", "...", ".", ":", "&&", "||", "===", "!==", "++", "--"
-]
+SYNTACTIC = {
+	",", "=", "...", ".", ":", "&&", "||", "===", "!==", "++", "--", "=>", "->"
+}
+# Reminder: Higher precedence binds more strongly
 PRECS = {
-	",": 1,
+	#",": 1, ":": 1,
 	"=": 2,
 	"..": 3, "...": 3,
 	"||": 3, "^^": 4, "&&": 5, "|": 6, "^": 7, "&": 8,
@@ -51,23 +76,20 @@ PRECS = {
 	"!": 12, "~": 13, "+": 14, "-": 14,
 	"*": 15, "/": 15, "%": 15,
 	"**": 16, "//": 16, "%%": 16,
+	"++": 0, "--": 0,
 	".": 17
 }
 
-# Right-associative operators
-RIGHT = [
-	"**"
-]
+# Unary operators can be prefix or postfix, but cannot be infix. All binary
+#  operators can be prefix unary operators
+UNARY = {
+	"!", "?", "++", "--", "..."
+}
 
-KW = [
-	"if", "then", "else", "loop", "while", "do", "for",
-	"with", "switch", "case", "try", "finally",
-	"return", "yield", "fail", "await", "break", "continue", "redo"
-	"var", "const", "proto", "struct", "function",
-	"async", "strict", "public", "private", "static", "var", "const"
-	"this", "super", "none", "inf", "nan",
-	"new", "delete", "in", "is", "as", "has"
-]
+# Right-associative operators
+RIGHT = {
+	"**"
+}
 
 RADIX = {
 	"bin": 2,
@@ -92,21 +114,37 @@ class Token:
 		self.line = l
 		self.col = c
 		
+		# Flag indicating if this token was an operator followed by the =
+		#  meta-operator. Without this, = has the lowest precedence so is
+		#  likely to be less than min_prec, but the = will have already been
+		#  consumed.
 		self.assign = False
 	
 	def __str__(self):
 		return f"{self.type}:{self.value}"
+	
+	def __repr__(self):
+		return f"Token({self.type!r}, {self.value!r})"
+	
+	def __eq__(self, other):
+		eq = (self.p == other.p)
+		if eq:
+			if self.line != other.line:
+				warnings.warn("Two tokens at the same position have different line numbers")
+			if self.col != other.col:
+				warnings.warn("Two tokens at the same position have different line numbers")
+		return eq
 
-def semiAsExpr(cur, block):
+def semiAsExpr(block):
 	'''
 	Convert a list of expressions to a single expression, possibly a Block
 	'''
 	if len(block) == 0:
-		return Value(cur, EspNone)
+		return ast.Value(EspNone)
 	elif len(block) == 1:
 		return block[0]
 	else:
-		return Block(cur, block)
+		return ast.Block(block)
 
 # Context-less stream of tokens to be fed to the parser
 class Lexer:
@@ -117,11 +155,10 @@ class Lexer:
 		self.col = 0
 		self.indent = 0
 		
-		self.la = None
 		self.cur = None
 	
-	def log(self, *args):
-		print(' '*self.indent, *args)
+	def log(self, *args, **kwargs):
+		print(' '*self.indent, *args, **kwargs)
 	
 	def error(self, tok, msg=None):
 		'''
@@ -143,17 +180,17 @@ class Lexer:
 		sol = self.src.rfind('\n', 0, pos)
 		if sol == -1:
 			sol = 0
-		left = pos - 60 # Prioritize before over after
+		left = sol - 60 # Prioritize before over after
 		if left < 0:
 			left = 0
 		
 		# Cutoff at 80 chars or the end of the line
-		pre = self.src[left:80].split('\n')[0]
+		pre = self.src.split('\n')[line - 1].replace('\t', ' ')[left:][:80]
 		# Point to the error
-		pre += f"\n{'-'*(pos - left)}^"
+		pre += f"\n{'-'*(col - left)}^"
 		
 		# DEBUG
-		pre += f"\n{self.src[pos:]}"
+		#pre += f"\n{self.src[pos:]}"
 		
 		return ParseError(msg, pre, pos, line, col)
 		
@@ -179,6 +216,7 @@ class Lexer:
 		if self.pos >= len(self.src):
 			return None
 		
+		# Skip all comments
 		while True:
 			comment = self.match(COMMENT)
 			if comment is None: break
@@ -209,44 +247,44 @@ class Lexer:
 		# Find the first match to determine which token type it is
 		g = m.groups()
 		
-		# Named matches are ignored, but they're included in .groups() so we
-		#  need to explicitly skip them
+		# Named matches are included in .groups() so we need to explicitly
+		#  skip them
 		skip = TOKEN.groupindex.values()
 		
 		x = 0
 		for i in range(len(g)):
 			if i not in skip:
-				tok = g[i]
-				if tok: break
+				val = g[i]
+				if val: break
 				x += 1
 		
 		tt = NAMES[x]
 		
-		if tt == "id":
-			if tok in KW:
-				tt = "kw"
-			val = tok
-		elif tt in RADIX:
+		if tt in RADIX:
 			r = RADIX[tt]
 			if r != 10:
-				tok = tok[2:]
+				val = val[2:]
 			tt = "val"
-			val = int(tok.replace("_", ""), r)
+			val = int(val.replace("_", ""), r)
 		elif tt == "flt":
 			tt = "val"
-			val = float(tok.replace("_", ""))
+			val = float(val.replace("_", ""))
 		elif tt in {"sq", "dq", "bq"}:
 			tt = "str"
-			val = EspString(tok[1:-1])
+			val = EspString(val[1:-1])
 		elif tt in {"sq3", "dq3", "bq3"}:
 			tt = "str"
-			val = EspString(tok[3:-3])
-		elif tt == "op":
-			val = tok
-		elif tt == "punc":
-			val = tok
+			val = EspString(val[3:-3])
+		elif tt == "kw":
+			if val in KWALIASES:
+				tt = "op"
+				val = KWALIASES[val]
+		
+		# Tokens with no special postprocessing
+		elif tt in {"id", "kw", "op", "punc"}:
+			pass
 		else:
-			raise self.error(f"Unimplemented token {tt}:{tok}")
+			raise self.error(f"Unimplemented token {tt}:{val}")
 		
 		ncur = Token(val, tt, self.pos, self.line, self.col)
 		
@@ -256,6 +294,9 @@ class Lexer:
 	
 	def consume(self):
 		'''LR(1) tokenization to derive meta-operators'''
+		
+		self.cur = self.next()
+		return self.cur
 		
 		if self.la:
 			self.cur = self.la
@@ -314,18 +355,16 @@ class Lexer:
 			raise self.expected(value or type)
 		return m
 	
-	def expected(self, tok, what):
-		return self.error(tok, "Expected " + what)
+	def expected(self, what):
+		return self.error(self.cur, f"Expected {what}, got {self.cur}")
 
 class Parser(Lexer):
 	def __init__(self, src):
 		super().__init__(src)
 		self.scope = []
-		
 		self.consume()
 	
 	def addVar(self, var):
-		print(self.scope)
 		self.scope[-1].append(var)
 	
 	def lvalue(self):
@@ -340,7 +379,7 @@ class Parser(Lexer):
 		else:
 			raise self.error(x.token, "Not an l-value")
 	
-	def ident(self):
+	def relaxid(self):
 		'''
 		Parse an identifier with relaxed restrictions. Most token types are
 		 converted to a corresponding identifier, eg "+"
@@ -351,9 +390,8 @@ class Parser(Lexer):
 		ct = cur.type
 		
 		if ct in {"str", "id", "op"}:
-			cur.type = "str"
 			self.consume()
-			return cur
+			return ast.Value(val).origin(cur)
 		else:
 			x = self.atom()
 			if x: return x
@@ -373,7 +411,7 @@ class Parser(Lexer):
 			
 			tok = self.maybe("=")
 			if tok:
-				name = Assign(tok, name, self.expr())
+				name = ast.Assign(name, self.expr()).origin(tok)
 			
 			vl.append(name)
 			
@@ -382,12 +420,12 @@ class Parser(Lexer):
 		
 		return vl
 	
-	def commalist(self, pat):
+	def listing(self, sep, pat):
 		v = []
 		x = pat()
 		while x:
 			v.append(x)
-			if not self.maybe(","):
+			if not self.maybe(sep):
 				break
 			
 			x = pat()
@@ -399,7 +437,7 @@ class Parser(Lexer):
 	
 	def funcargs(self):
 		args = self.lvalue()
-		if type(args) is Tuple:
+		if type(args) is ast.Tuple:
 			return args.elems
 		else:
 			return [args]
@@ -408,16 +446,16 @@ class Parser(Lexer):
 		obj = []
 		
 		if self.maybe("}"):
-			return Value(cur, EspDict())
+			return ast.Value(cur, EspDict())
 		
 		while not self.maybe("}"):
 			tok = self.cur
 			if tok.type in {"val", "id", "op"}:
-				key = Value(tok, tok.value)
+				key = ast.Value(tok.value)
 			elif tok.type == "kw":
 				if tok.value in {"get", "set"}:
 					raise NotImplementedError("get/set")
-				key = Value(tok.value)
+				key = ast.Value(tok.value)
 			elif tok.type == "punc":
 				if tok.value == "[":
 					raise NotImplementedError("Computed properties")
@@ -425,26 +463,28 @@ class Parser(Lexer):
 			else:
 				raise self.error(tok, f"Unknown token {tok!r}")
 			
+			key = key.origin(tok)
+			
 			self.consume()
 			
 			if self.peek("("):
 				# Object method
 				functok = self.cur
 				args = self.funcargs()
-				value = Func(functok, key, args, self.block())
+				value = ast.Func(key, args, self.block()).origin(functok)
 			elif self.maybe(":"):
 				# Normal property
 				value = self.expr()
 			else:
 				# NOTE: Doesn't work for computed properties
-				value = Var(key.value)
+				value = ast.Var(key.value)
 			
 			obj.append((key, value))
 			
 			# Should commas be optional?
 			self.maybe(",")
 		
-		return ObjectLiteral(cur, obj)
+		return ast.ObjectLiteral(obj).origin(cur)
 	
 	def parse_proto(self, cur):
 		# TODO: anonymous proto
@@ -452,7 +492,7 @@ class Parser(Lexer):
 		name = self.maybe(type="id")
 		
 		if self.maybe("is"):
-			parent = self.ident()
+			parent = self.relaxid()
 		else:
 			parent = None
 		
@@ -464,24 +504,24 @@ class Parser(Lexer):
 		
 		while not self.maybe("}"):
 			qual = self.maybe({"public", "var", "private", "static"})
-			mem = self.maybe(type="id")
+			member = self.maybe(type="id")
 			
 			if self.maybe("("):
-				params = self.commalist(self.lvalue)
+				params = self.listing(",", self.lvalue)
 				self.expect(")")
 				
 				body = self.block()
 				
-				members = [Func(mem, mem.value, params, body)]
+				members = [ast.Func(member.value, params, body).origin(member)]
 			else:
-				members = [Var(mem, mem.value)]
+				members = [ast.Var(member.value).origin(member)]
 				
 				while self.maybe(","):
 					mem = self.maybe(type="id")
 					if mem is None:
 						raise RuntimeError("None name")
 					
-					members.append(Var(mem, mem.value))
+					members.append(ast.Var(mem, mem.value))
 			
 			if not qual or qual.value in {"public", "var"}:
 				pub += members
@@ -496,16 +536,17 @@ class Parser(Lexer):
 		
 		name = name.value if name else None
 		
-		p = Proto(cur, name, parent, pub, priv, stat)
+		p = ast.Proto(name, parent, pub, priv, stat).origin(cur)
 		
 		if name is None:
 			return p
 		else:
-			v = Var(cur, name, mutable=False)
+			v = ast.Var(name, mutable=False)
 			self.addVar(v)
-			return Assign(cur, v, p)
+			return ast.Assign(cur, v, p)
 	
-	def maybe_while(self):
+	def parse_while(self):
+		# "while" token already consumed
 		cond = self.expr()
 		bl = self.block()
 		
@@ -541,7 +582,7 @@ class Parser(Lexer):
 				op = "else"
 				val = None
 			else:
-				raise self.expected("case or else")
+				raise self.expected(cur, "case or else")
 			
 			# Immediate or fallthrough?
 			
@@ -553,23 +594,17 @@ class Parser(Lexer):
 			# Block of the clause
 			
 			bl = self.block()
-			c = Case(cur, op, val, bl, ln)
+			c = ast.Case(op, val, bl, ln).origin(cur)
 			if op == "else":
 				if de:
-					raise self.error("Duplicate else case")
+					raise self.error(cur, "Duplicate else case")
 				de = c
 			
 			cs.append(c)
 		
 		# Process follow up blocks
 		
-		cur = self.cur
-		if self.maybe("then"):
-			th = Case(cur, "then", None, self.block(), None)
-		
-		cur = self.cur
-		if self.maybe("else"):
-			el = Case(cur, "else", None, self.block(), None)
+		th, el = self.then_else()
 		
 		# Link adjacent fallthrough blocks together
 		
@@ -587,10 +622,10 @@ class Parser(Lexer):
 		if de in cs:
 			cs.remove(de)
 		
-		return Switch(swtok, ex, cs, de, th, el)
+		return ast.Switch(ex, cs, de, th, el).origin(swtok)
 	
 	def then_else(self):
-		th = el = Value(None, EspNone)
+		th = el = None
 		
 		if self.maybe("then"):
 			th = self.block()
@@ -614,20 +649,122 @@ class Parser(Lexer):
 			if x != -1:
 				y = scan.find("}", x)
 				if upto != x:
-					parts.append(scan[upto:x])
+					parts.append(ast.Value(scan[upto:x]))
 				sp = Parser(scan[x + 2:y]).parse()
-				parts.append(Block(cur, sp.elems, sp.vars))
+				parts.append(semiAsExpr(sp.elems))
 				upto = y + 1
 			else:
 				break
 		
 		if upto < len(val):
-			parts.append(val[upto:])
+			parts.append(ast.Value(val[upto:]))
 		
 		if len(parts) == 1:
-			return Value(cur, parts[0])
+			return parts[0].origin(cur)
 		else:
-			return Format(cur, parts)
+			return ast.Format(parts).origin(cur)
+	
+	def parse_if(self, cur):
+		cond = self.expr()
+		self.maybe("then")
+		
+		th = self.block()
+		el = None
+		if self.maybe("else"):
+			el = self.block()
+		
+		return ast.If(cond, th, el).origin(cur)
+	
+	def parse_import(self, cur):
+		return ast.Import(self.expr()).origin(cur)
+	
+	def parse_listliteral(self, cur):
+		if self.maybe("]"):
+			return ast.Value(EspList()).origin(cur)
+		
+		vals = []
+		while True:
+			vals.append(self.expr())
+			if not self.maybe(","):
+				break
+		self.expect("]")
+		
+		return ast.ListLiteral(vals).origin(cur)
+	
+	def parse_unary(self, cur):
+		return ast.Op(cur.value, ast.Value(EspNone), self.atom()).origin(cur)
+	
+	def parse_loop(self, cur):
+		always = self.block()
+		
+		if self.maybe("while"):
+			cond, bl, th, el = self.parse_while()
+			
+			return ast.Loop(ast.Block([
+				always, ast.If(cond, bl, th)
+			]), el=el).origin(cur)
+		else:
+			return ast.Loop(cur, always).origin(cur)
+	
+	def parse_for(self, cur):
+		self.expect("(")
+		qual = self.qualifier()
+		itvar = self.lvalue()
+		self.expect("in")
+		toiter = self.expr()
+		self.expect(")")
+		body = self.block()
+		
+		th, el = self.then_else()
+		
+		# TODO: n is a generalized lvalue, not a Var
+		return ast.ForLoop(itvar, toiter, body, th, el).origin(cur)
+	
+	def parse_decl(self, cur):
+		'''
+		Var declarations are split into two separate concerns,
+			variable name hoisting to the innermost enclosing
+			scope and assignment of the variable at the correct
+			point (by returning assignments as a group of
+			assignment s-exprs)
+		'''
+		
+		mut = (cur.value != "const")
+		
+		group = []
+		while True:
+			name = self.expect(type="id")
+			
+			v = ast.Var(name.value, mut).origin(cur)
+			self.addVar(v)
+			
+			if self.maybe("="):
+				x = self.expr()
+				if x is None:
+					raise self.expected("expression")
+				
+				group.append(ast.Assign(v, x).origin(cur))
+			
+			if not self.maybe(","):
+				break
+		return semiAsExpr(group)
+	
+	def parse_funcliteral(self, cur):
+		name = None
+		if self.cur.type == "id":
+			name = ast.Value(self.cur.value)
+			self.consume()
+		
+		args = self.funcargs()
+		
+		block = self.block()
+		func = ast.Func(name, args, block).origin(cur)
+		
+		if name:
+			self.addVar(name.value)
+			return ast.Assign(name, func).origin(cur)
+		else:
+			return func
 	
 	def atom(self):
 		if self.cur is None:
@@ -638,163 +775,108 @@ class Parser(Lexer):
 		ct = cur.type
 		
 		# Exceptions which shouldn't be consumed
-		if val in {")", ";", "}", "case", "else"}:
+		if val in {")", ";", "}", "]", "case", "else"}:
 			return None
 		
 		self.consume()
 		
 		if ct == "val":
-			return Value(cur, cur.value)
+			return ast.Value(cur.value).origin(cur)
 		elif ct == "str":
 			return self.process_string(cur)
 		
 		elif ct == "id":
-			v = Var(cur, cur.value)
+			v = ast.Var(cur.value).origin(cur)
 			
 			# Check string call
 			s = self.maybe(type="str")
 			if s:
-				return Call(s, v, [self.process_string(s)])
+				return ast.Call(v, [self.process_string(s)]).origin(s)
 			
 			return v
 		elif ct == "punc":
 			if val == "(":
 				if self.maybe(")"):
-					return Tuple(cur, [])
+					return ast.Tuple([]).origin(cur)
 				
 				x = self.semichain()
 				self.expect(")")
-				return semiAsExpr(cur, x)
+				return semiAsExpr(x)
 			elif val == "{":
 				return self.parse_objectliteral(cur)
+			elif val == "[":
+				return self.parse_listliteral(cur)
 			#elif val == ")": pass
 			#elif val == "}": pass
 			# TODO: dot functions
 			else:
 				raise NotImplementedError(val)
 		elif ct == "op":
-			return Op(cur, Value(None, EspNone), self.atom())
+			return self.parse_unary(cur)
 		elif ct == "kw":
 			if val == "if":
-				cond = self.expr()
-				self.maybe("then")
-				
-				th = self.block()
-				el = Value(None, EspNone)
-				if self.maybe("else"):
-					el = self.block()
-				
-				return If(cur, cond, th, el)
-			
+				return self.parse_if(cur)
 			elif val == "none":
-				return Value(cur, EspNone)
+				return ast.Value(EspNone).origin(cur)
 			elif val == "inf":
-				return Value(cur, float('inf'))
+				return ast.Value(float('inf')).origin(cur)
 			elif val == "nan":
-				return Value(cur, float('nan'))
+				return ast.Value(float('nan')).origin(cur)
 			elif val == "proto":
 				return self.parse_proto(cur)
 				
 			elif val == "import":
-				return Import(cur, self.expr())
+				return self.parse_import(cur)
 			elif val == "loop":
-				always = self.block()
-				
-				if self.maybe("while"):
-					cond, bl, th, el = self.maybe_while()
-					
-					return Loop(cur, Block(cur, [
-						always, If(cond, bl, th)
-					]), el=el)
-				else:
-					return Loop(cur, always)
+				return self.parse_loop(cur)
 				
 			elif val == "while":
-				cond, bl, th, el = self.maybe_while()
+				cond, bl, th, el = self.parse_while()
 				
 				# Not account for el
-				return Loop(cur, Block(cur, [
-					If(cur, cond, bl, Branch(cur, "break"))
-				]), el=el)
+				return ast.Loop(ast.Block([
+					ast.If(cond, bl, ast.Branch("break"))
+				]), el=el).origin(cur)
 			
 			elif val == "for":
-				self.expect("(")
-				qual = self.qualifier()
-				itvar = self.lvalue()
-				self.expect("in")
-				toiter = self.expr()
-				self.expect(")")
-				body = self.block()
-				
-				it = Var(cur, "$it")
-				
-				th, el = self.then_else()
-				
-				# TODO: n is a generalized lvalue, not a Var
-				return ForLoop(cur, itvar, toiter, body, th, el)
+				return self.parse_for(cur)
 			
 			elif val == "switch":
 				return self.parse_switch(cur)
 			
 			elif val in {"break", "continue", "redo"}:
-				return Branch(cur, val)
+				return ast.Branch(val).origin(cur)
 				# Todo: targeted branches
 			
 			elif val in {"var", "const"}:
-				'''
-				Var declarations are split into two separate concerns,
-				 variable name hoisting to the innermost enclosing
-				 scope and assignment of the variable at the correct
-				 point (by returning assignments as a group of
-				 assignment s-exprs)
-				'''
-				
-				mut = (val != "const")
-				
-				group = []
-				while True:
-					name = self.expect(type="id")
-					
-					v = Var(cur, name.value, mut)
-					self.addVar(v)
-					
-					if self.maybe("="):
-						x = self.expr()
-						if x is None:
-							raise self.expected("expression")
-						
-						group.append(Assign(cur, v, x))
-					
-					if not self.maybe(","):
-						break
-				return semiAsExpr(cur, group)
+				return self.parse_decl(cur)
 			
 			elif val == "function":
-				name = None
-				if self.cur.type == "id":
-					name = self.cur.value
-					self.consume()
-				
-				args = self.funcargs()
-				
-				block = self.block()
-				func = Func(cur, name, args, block)
-				
-				if name:
-					self.addVar(name)
-					return Assign(cur, Var(cur, name), func)
-				else:
-					return func
+				return self.parse_funcliteral(cur)
 			
 			elif val == "try":
 				raise NotImplementedError("try")
 			
 			else:
-				raise self.error("Unimplemented keyword " + val)
+				raise self.error(f"Unimplemented keyword {val}")
 		
-		raise self.error("Unknown token " + val)
+		raise self.error(f"Unknown token {val}")
 	
-	def atom2(self):
+	def postfix_unary(self):
+		lhs = self.atom()
+		
+		while True:
+			op = self.peek(type="op")
+			
+			if op and op.value in UNARY:
+				self.consume()
+				lhs = ast.Op([lhs, EspNone]).origin(op)
+			else:
+				break
+		
+		return lhs
+	
+	def index_chain(self):
 		'''Second-order atom parsing''' 
 		
 		lhs = self.atom()
@@ -803,8 +885,8 @@ class Parser(Lexer):
 			dot = self.maybe(".")
 			if not dot: break
 			
-			rhs = self.ident()
-			lhs = Index(dot, lhs, [Value(rhs, rhs.value)])
+			rhs = self.relaxid()
+			lhs = ast.Index(dot, lhs, [rhs])
 		
 		return lhs
 	
@@ -822,86 +904,75 @@ class Parser(Lexer):
 			b = self.semichain()
 			self.scope.pop()
 			self.expect("}")
-			
 			if len(vars) > 0:
-				return semiAsExpr(cur, b)
+				return semiAsExpr(b)
 			else:
-				return Block(cur, b, vars)
+				return ast.Block(b, vars).origin(cur)
 		else:
 			x = self.expr()
 			self.maybe(";")
 			return x
 	
-	def binop(self):
-		op = self.cur.value
-		if op not in PRECS:
-			return None, None
+	def parse_call(self, lhs, cur):
+		args = self.listing(",", lambda: self.expr())
+		self.expect(")")
+		return  ast.Call(lhs, args).origin(cur)
+	
+	def parse_index(self, lhs, cur):
+		args = self.listing(":", lambda: self.expr())
+		self.expect("]")
 		
-		self.consume()
-		
-		return op, self.maybe("=")
+		return ast.Index(lhs, args).origin(cur)
 	
 	def expr(self, min_prec=0):
 		'''
 		Uses precedence climbing
 		'''
 		
-		lhs = self.atom2()
-		
+		lhs = self.index_chain()
 		while self.cur is not None:
 			cur = self.cur
+			
+			if self.maybe("("):
+				lhs = self.parse_call(lhs, cur)
+				continue
+			
+			if self.maybe("["):
+				lhs = self.parse_index(lhs, cur)
+				continue
+			
 			op = cur.value
+			if op.endswith('='):
+				op = None if op == '=' else op[:-1]
+				assign = True
+			else:
+				assign = False
 			
-			if op == "(":
-				self.consume()
-				args = []
-				while True:
-					args.append(self.expr(PRECS[','] + 1))
-					
-					if not self.maybe(","):
-						break
-				self.expect(")")
-				lhs = Call(cur, lhs, args)
-				continue
-			
-			if op == "[":
-				args = []
-				while True:
-					args.append(self.expr(PRECS[':'] + 1))
-					
-					if not self.maybe(":"):
-						break
-				self.expect("]")
-				
-				lhs = Index(cur, lhs, args)
-				continue
-			
-			if op not in PRECS:
+			if op and op not in PRECS:
 				break
 			
-			assign = self.cur.assign
-			prec = assign and PRECS['='] or PRECS[op]
-			
+			prec = PRECS['=' if assign else op]
 			if prec < min_prec:
 				break
 			
-			next_min_prec = prec + (op in RIGHT)
 			self.consume()
+			
+			next_min_prec = prec + (op not in RIGHT)
 			
 			rhs = self.expr(next_min_prec)
 			
 			if assign:
-				lhs = Assign(cur, lhs, rhs, op if op != "=" else None)
+				lhs = ast.Assign(lhs, rhs, op).origin(cur)
 			else:
 				if op == ",":
-					if type(lhs) is Tuple:
+					if type(lhs) is ast.Tuple:
 						lhs.append(rhs)
 					else:
-						lhs = Tuple(None, [lhs, rhs])
+						lhs = ast.Tuple([lhs, rhs])
 				elif op == ".":
-					lhs = Index(cur, lhs, [rhs])
+					lhs = ast.Index(lhs, [rhs])
 				else:
-					lhs = Op(cur, lhs, rhs)
+					lhs = ast.Op(op, lhs, rhs)
 		
 		return lhs
 	
@@ -926,6 +997,28 @@ class Parser(Lexer):
 	def parse(self):
 		vars = []
 		self.scope.append(vars)
-		prog = Prog(self.semichain(), vars)
+		prog = ast.Prog(self.semichain(), vars)
 		self.scope.pop()
 		return prog
+
+# Debug stuff
+
+'''
+def indentify(method):
+	def wrap(self, *args, **kwargs):
+		p = ', '.join(repr(x) for x in args) if args else ''
+		k = ', '.join(f"{x}={y!r}" for x,y in kwargs.items()) if kwargs else ''
+		pk = f"{p!r}, {k!r}" if p and k else p + k
+		self.log(f"{method.__name__}({pk})")
+		self.indent += 1
+		tmp = method(self, *args, **kwargs)
+		self.indent -= 1
+		return tmp
+	return wrap
+
+for name in dir(Parser):
+	if not name.startswith("__") and name not in {"log", "match", "next", "repos"}:
+		member = getattr(Parser, name)
+		if isinstance(member, type(Parser.parse)):
+			setattr(Parser, name, indentify(member))
+'''

@@ -390,7 +390,7 @@ strict function **(x, y) {
 	}
 	
 error:
-	throw new TypeError("Invalid types for **);
+	throw new TypeError("Invalid types for **");
 }
 
 strict function //(x, y) {
@@ -622,8 +622,3 @@ proto long is int {
 		else NotImplemented;
 	}
 }
-
-Thurs 9:45 AM Carie Underwood Lovelace appt
-15 2019
-chip 981020029378446
-cabq.gov

@@ -1,11 +1,95 @@
-file = {statement}
-statement = (expr | if | dowhile | while | for | each) ";"?
-expr = literal | "(" expr ")" | expr binop expr | unop expr
-literal = ident | suffixed | real | "inf" | "nan" | none" | function | list | object
-suffixed = (string | int) :: identifier
-string = ([rbfc]*)('...' | "..." | '''...''' | """...""")
-int = "0"("b" [01_]+ | "o" [0-7_]+ | "x" [0-9a-fA-F_]+) | [0-9_]+
-real = ([0-9_]+ "." [0-9_]* | [0-9_]* "." [0-9_]+) ([eE] [-+]? [0-9_])?
-list = "[" (expr {"," expr})? "]"
-object = "{" (entry {"," entry})? "}"
-entry = ident | string 
+### Tokens defined by regex ###
+
+whitespace = /\s+/;
+comment = /#\*.*\*#/;
+ignore = whitespace | comment;
+
+bin = /0b[_01]*[01]/;
+oct = /0o[_0-7]*[0-7]/;
+hex = /0x[_\da-fA-F]*[\da-fA-F]/;
+flt = /(?:\.\d[_\d]*|\d[_\d]*\.(?:\d[_\d]*)?)(?:e[-+]\d[_\d]*)?/;
+dec = /\d+/;
+sq = /'(?:\\.|.+?)*?'/;
+dq = /"(?:\\.|.+?)*?"/;
+bq = /`(?:\\.|.+?)*?`/;
+sq3 = /'''(?:\\.|.+?)*?'''/;
+dq3 = /"""(?:\\.|.+?)*?"""/;
+bq3 = /```(?:\\.|.+?)*?```/;
+
+# Keyword must be before idents to take priority
+kw = /
+	if|then|else|loop|while|do|for|
+	with|switch|case|try|finally|
+	return|yield|fail|await|break|continue|redo|
+	var|const|proto|struct|function|
+	async|strict|public|private|static|var|const|
+	this|super|none|inf|nan|
+	new|delete|in|is|as|has
+/;
+id = /[\w_][\w\d_]*/;
+punc = /[()\[\]{}]|\.{1,3}/;
+
+# Ops can be contextual identifiers, puncs can't
+op = /
+	[@~;,?] | # Single-character operators
+	[-~=]> | # Arrows
+	={1,3} | !={,2} | [<>:]=? | # Comparison operators and :=
+	(?P<d>[-+*/%&|^:!])(?P=d)? | # Operators which can be single or doubled
+	<<[<>]|<>|[<>]>> # Bit shift operators
+/;
+
+### Grammar ###
+
+if = "if" expr ["then"] block ["else" block];
+thel = ["then" block] ["else" block];
+loop = "loop" block [while | thel];
+while = "while" block thel;
+statement = if | loop | while | expr;
+
+switch = "switch" expr "{" (
+	("case" expr | "else") (":" | "=>") block
+) "}" thel;
+
+access = "public" | "private" | "static";
+decl = "var" | "const";
+
+string = sq | dq | bq | sq3 | dq3 | bq3;
+function = "function" callable;
+list = "[" tuple "]"; # [,] == [none], [x, y,] == [x, y]
+object = "{" {[relaxid [":" expr | callable]] [","]} "}";
+proto = "proto" [id] ["is" expr] "{" {
+	[access] [decl] name [[":" expr] ["=" expr] | callable]]
+} "}";
+
+tuple = {[expr] ","};
+call = expr "(" tuple ")" | id (string | object);
+
+literal = "inf" | "nan" | "none" | ident | string | function | list | object;
+
+expr = literal | "(" expr ")" | tuple | expr binop expr | unop expr | switch | statement;
+block = "{" {[id ":"] [statement] [";"]} "}" | expr;
+callable = "(" {id [":" expr] ["=" expr] ","} ")" block;
+
+file = {statement};
+
+atom = "(" expr ")";
+index = atom {"." relaxid | "[" expr {":" expr} "]"};
+exp = index {"**" index};
+mult = exp {("*" | "/" | "%") exp};
+shift = mult {("<<" | "<<<" | "<<>" | ">>" | ">>>" | "<>>") mult};
+incdec = ["++" | "--"] shift;
+inequality = shift {(">" | ">=" | "<" | "<=" | "<>") shift};
+equality = inequality {("==" | "===" | "!=" | "!==") inequality};
+bit-and = equality {"&" equality};
+bit-xor = bit-and {"^" bit-and};
+bit-or = bit-xor {"|" bit-xor};
+and = bit-or {("and" | "&&") bit-or};
+xor = and {("xor" | "^^") and};
+or = xor {("or" | "||") xor};
+range = or {".." or};
+tuple = range {"," [range]};
+assign = tuple {[op] "=" tuple};
+
+semi = expr {";" [expr]};
+
+postfix = index {postop};

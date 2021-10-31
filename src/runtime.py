@@ -11,6 +11,17 @@ class EspNoneType:
 	# Remove this when we stop making this mistake
 	def visit(self, v):
 		raise RuntimeError("none.visit()")
+	
+	def __add__(self, other):
+		if not isinstance(other, str):
+			return other
+	__radd__ = __add__
+	
+	def __sub__(self, other):
+		return -other
+	
+	def __rsub__(self, other):
+		return other
 
 EspNone = EspNoneType()
 
@@ -47,3 +58,29 @@ class EspDict(dict):
 	
 	def __setitem__(self, name, value):
 		setattr(self, name, value)
+
+class EspList(list):
+	@property
+	def length(self):
+		return len(self)
+	
+	def __getattr__(self, name):
+		return EspNone
+	
+	def __getitem__(self, x):
+		if type(x) is int:
+			if x > len(self):
+				return EspNone
+			return super()[x]
+		return getattr(self, x)
+	
+	def push(self, x):
+		self.append(x)
+	
+	def push_front(self, x):
+		self.insert(0, x)
+	
+	def pop_front(self):
+		x = self[0]
+		del self[0]
+		return x

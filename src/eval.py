@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from ast import Var, Value, Op, Statement
+import ast
 from runtime import EspNone, EspProto, EspString
 
 class Visitor:
@@ -91,9 +91,9 @@ class EvalVisitor(Visitor):
 	
 	def visit_if(self, v):
 		if v.cond.visit(self):
-			return v.th.visit(self)
+			return v.th.visit(self) if v.th else EspNone
 		else:
-			return v.el.visit(self)
+			return v.el.visit(self) if v.el else EspNone
 	
 	def visit_loop(self, v):
 		ls = []
@@ -103,8 +103,9 @@ class EvalVisitor(Visitor):
 					ls.append(v.body.visit(self))
 				except ContinueSignal:
 					pass
+				
 		except (BreakSignal, StopIteration):
-			v.el.visit(self)
+			v.el.visit(self) if v.el else EspNone
 			return ls
 	
 	def visit_branch(self, v):
@@ -153,6 +154,8 @@ class EvalVisitor(Visitor):
 		raise ReturnSignal(v)
 	
 	def visit_op(self, v):
+		#print(v.args)
+		#print([repr(x.visit(self)) for x in v.args])
 		return SIMPLE_OPS[v.op](*(x.visit(self) for x in v.args))
 	
 	def visit_value(self, v):
@@ -166,7 +169,7 @@ class EvalVisitor(Visitor):
 		name = v.name.name
 		
 		if v.op:
-			print(self.stack)
+			#print(self.stack)
 			old = self.lookup(name)[name]
 			val = SIMPLE_OPS[v.op](old, v.value.visit(self))
 		else:
@@ -189,7 +192,10 @@ class EvalVisitor(Visitor):
 		last = EspNone
 		for x in v.elems:
 			next = x.visit(self)
-			if not isinstance(x, Statement):
+			
+			if isinstance(x, ast.Origin):
+				x = x.node
+			if not isinstance(x, ast.Statement):
 				last = next
 		
 		return last
@@ -257,6 +263,9 @@ class EvalVisitor(Visitor):
 		
 		return obj
 	
+	def visit_listliteral(self, v):
+		return [x.visit(self) for x in v.values]
+	
 	def visit_forloop(self, v):
 		# Doesn't account for destructuring
 		itvar = v.itvar.name
@@ -269,11 +278,11 @@ class EvalVisitor(Visitor):
 				v.body.visit(self)
 				
 		except StopIteration:
-			v.th.visit(self)
+			v.th.visit(self) if v.th else EspNone
 		
 		except BreakSignal:
-			v.el.visit(self)
+			v.el.visit(self) if v.el else EspNone
 		
 		# This is incorrect but I'm too tired to do it right (which would
 		#  require proper refactoring to support generators)
-		return None
+		return EspNone

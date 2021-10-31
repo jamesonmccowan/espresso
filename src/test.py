@@ -2,18 +2,15 @@ import parse
 import eval
 import sys
 import pprint
+import argparse
 
-if len(sys.argv) == 1:
-	print("Call with a program")
-	exit()
-
-if sys.argv[1] == "-c":
-	if len(sys.argv) == 2:
-		print("Need a string")
-		exit()
-	src = sys.argv[2]
-else:
-	src = open(sys.argv[1]).read()
+ap = argparse.ArgumentParser(description="Test VM for Espresso")
+ap.add_argument('-c', '--cmd', help="Execute a program passed by commandline")
+ap.add_argument('-f', '--file', help="Execute the given file")
+ap.add_argument('-t', '--tokens', help="Print the token stream", action="store_true")
+ap.add_argument('-p', '--print', help="Print the AST", action="store_true")
+ap.add_argument('-r', '--raw', help="Print the raw representation", action="store_true")
+ap.add_argument('-x', '--exec', help="Execute the source (default if not printing)", action="store_true")
 
 def tokstream(src):
 	p = parse.Lexer(src)
@@ -24,13 +21,33 @@ def tokstream(src):
 		else:
 			break
 
-pprint.pp(list(tokstream(src)))
+def main():
+	args = ap.parse_args()
+	
+	if args.cmd is not None:
+		src = args.cmd
+	elif args.file is not None:
+		src = open(args.file).read()
+	else:
+		print("Give either a command or a file")
+		exit()
+	
+	if args.tokens:
+		print(list(tokstream(src)))
+	
+	prog = parse.Parser(src).parse()
+	
+	if args.print:
+		print(str(prog))
+	
+	if args.raw:
+		print(repr(prog))
+	
+	if args.exec or not args.print:
+		ev = eval.EvalVisitor()
+		pprint.pp(prog.visit(ev))
+	
+	return
 
-prog = parse.Parser(src).parse()
-
-print(prog)
-pprint.pp(prog)
-
-ev = eval.EvalVisitor()
-
-pprint.pp(prog.visit(ev))
+if __name__ == "__main__":
+	main()
