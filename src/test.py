@@ -1,5 +1,6 @@
 import parse
 import eval
+import ast
 import sys
 import pprint
 import argparse
@@ -39,6 +40,7 @@ def main():
 	
 	if args.print:
 		print(str(prog))
+		#print(ast.PrettyPrinter().visit(prog))
 	
 	if args.raw:
 		print(repr(prog))

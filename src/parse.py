@@ -6,7 +6,10 @@ import ast
 from typing import *
 from runtime import EspString, EspNone, EspDict, EspList
 
-import warnings
+def unreachable(msg=None):
+	if msg:
+		raise AssertionError(msg)
+	raise AssertionError()
 
 class ParseError(RuntimeError):
 	def __init__(self, msg, pre, p, l, c):
@@ -20,12 +23,15 @@ KW = [
 	"if", "then", "else", "loop", "while", "do", "for",
 	"with", "switch", "case", "try", "finally",
 	"return", "yield", "fail", "await", "break", "continue", "redo"
-	"var", "const", "proto", "struct", "function",
+	"proto", "struct", "function",
 	"async", "strict", "public", "private", "static", "var", "const"
-	"this", "super", "none", "inf", "nan",
+	"this", "super",
+	"import", "export",
 	"new", "delete", "in", "is", "as", "has",
-	
 	"and", "or", "not", "xor"
+	
+	# Implemented as global constants
+	#"none", "inf", "nan",
 ]
 
 KWALIASES = {
@@ -37,48 +43,70 @@ KWALIASES = {
 
 # Token regex, organized to allow them to be indexed by name
 PATS = {
-	"bin": r"0b[_01]*[01]",
-	"oct": r"0o[_0-7]*[0-7]",
-	"hex": r"0x[_\da-fA-F]*[\da-fA-F]",
+	# Syntax "operators" which require special parsing rules
+	"punc": r"[()\[\]{}]|\.|\.{3}|[,;:]|[-=]>",
+	"cmp": r"[!=]={,2}|[<>!]=?|<>",
+	"assign": r"(?:(?P<d0>[~*/%&|^:])(?P=d0)?)?=",
+	"op": "|".join([ # Ops can be contextual identifiers, puncs can't
+		r"[@~?]", # Misc syntax
+		r"[-=]>", # Arrows
+		r"\.\.",
+		r"(?P<d1>[-+*/%&|^:!])(?P=d1)?", # Arithmetic and logical
+		r"<<[<>]|[<>]>>" # Shifts
+	]),
+	
+	"bin": r"?:0b([_01]*[01])",
+	"oct": r"?:0o([_0-7]*[0-7])",
+	"hex": r"?:0x([_\da-fA-F]*[\da-fA-F])",
 	"flt": r"(?:\.\d[_\d]*|\d[_\d]*\.(?!\.)(?:\d[_\d]*)?)(?:e[-+]\d[_\d]*)?",
 	"dec": r"\d+",
-	"sq": r"'(?:\\.|.+?)*?'",
-	"dq": r'"(?:\\.|.+?)*?"',
-	"bq": r"`(?:\\.|.+?)*?`",
-	"sq3": r"'''(?:\\.|.+?)*?'''",
-	"dq3": r'"""(?:\\.|.+?)*?"""',
-	"bq3": r"```(?:\\.|.+?)*?```",
+	"sq": r"?:'((?:\\.|.+?)*?)'",
+	"dq": r'?:"((?:\\.|.+?)*?)"',
+	"bq": r"?:`((?:\\.|.+?)*?)`",
+	"sq3": r"?:'''((?:\\.|.+?)*?)'''",
+	"dq3": r'?:"""((?:\\.|.+?)*?)"""',
+	"bq3": r"?:```((?:\\.|.+?)*?)```",
 	"kw": "|".join(KW),
-	"id": r"[\w][\w\d]*",
-	"punc": r"[()\[\]{}]|\.{1,3}",
-	"op": "|".join([ # Ops can be contextual identifiers, puncs can't
-		r"[@~;,?]", # Misc syntax
-		r"[-=]>", # Arrows
-		r"(?P<d0>[-+*/%&|^:])(?P=d0)?=", # Assignment ops
-		r"={1,3}", r"!={,2}", r"[<>]=?", # Comparison ops
-		r"(?P<d1>[-+*/%&|^:!])(?P=d1)?", # Arithmetic and logical
-		r"<<[<>]|<>|[<>]>>" # Shifts
-	])
+	"id": r"[\w_][\w\d]*"
 }
 # Operators which can't be overloaded because they encode syntax
 SYNTACTIC = {
 	",", "=", "...", ".", ":", "&&", "||", "===", "!==", "++", "--", "=>", "->"
 }
-# Reminder: Higher precedence binds more strongly
-PRECS = {
-	#",": 1, ":": 1,
-	"=": 2,
-	"..": 3, "...": 3,
-	"||": 3, "^^": 4, "&&": 5, "|": 6, "^": 7, "&": 8,
-	"==": 9, "!=": 9, "===": 9, "!==": 9,
-	"<": 10, "<=": 10, ">": 10, ">=": 10, "<>": 10,
-	"<<": 11, "<<<": 11, ">>": 11, ">>>": 11,
-	"!": 12, "~": 13, "+": 14, "-": 14,
-	"*": 15, "/": 15, "%": 15,
-	"**": 16, "//": 16, "%%": 16,
-	"++": 0, "--": 0,
-	".": 17
-}
+
+# Each operator is its own precedence class
+def separate(*v):
+	return [[x] for x in v]
+
+def build_precs(precs):
+	p = 0
+	for ops in precs:
+		for op in ops:
+			yield op, p
+		p += 1
+
+PRECS = dict(build_precs([
+	# Loosest binding strength
+	[';'],
+	['=>'],
+	['='],
+	[',', ":"],
+	['..', '...'],
+	['()', '[]', "{}"],
+	*separate("||", "^^", "&&"),
+	*separate("|", "^", "&"),
+	["==", "!=", "===", "!=="],
+	["<", "<=", ">", ">=", "<>"],
+	["<<", "<<<", "<<>", "<>>", ">>>", ">>"],
+	*separate("!", "~"),
+	["+", "-"], # Additive
+	["*", "/", "%"], # Multiplicative
+	["**", "//", "%%"], # Exponential
+	["++", "--"],
+	['.', '->', ":"],
+	[":"]
+	# Tightest binding strength
+]))
 
 # Unary operators can be prefix or postfix, but cannot be infix. All binary
 #  operators can be prefix unary operators
@@ -127,20 +155,14 @@ class Token:
 		return f"Token({self.type!r}, {self.value!r})"
 	
 	def __eq__(self, other):
-		eq = (self.p == other.p)
-		if eq:
-			if self.line != other.line:
-				warnings.warn("Two tokens at the same position have different line numbers")
-			if self.col != other.col:
-				warnings.warn("Two tokens at the same position have different line numbers")
-		return eq
+		return self.p == other.p
 
 def semiAsExpr(block):
 	'''
 	Convert a list of expressions to a single expression, possibly a Block
 	'''
 	if len(block) == 0:
-		return ast.Value(EspNone)
+		return ast.Value(None)
 	elif len(block) == 1:
 		return block[0]
 	else:
@@ -176,18 +198,10 @@ class Lexer:
 		
 		pos, line, col = src.pos, src.line, src.col
 		
-		# Want to build a preview, extract the start of line
-		sol = self.src.rfind('\n', 0, pos)
-		if sol == -1:
-			sol = 0
-		left = sol - 60 # Prioritize before over after
-		if left < 0:
-			left = 0
-		
 		# Cutoff at 80 chars or the end of the line
-		pre = self.src.split('\n')[line - 1].replace('\t', ' ')[left:][:80]
+		pre = self.src.split('\n')[line - 1].replace('\t', ' ')
 		# Point to the error
-		pre += f"\n{'-'*(col - left)}^"
+		pre += f"\n{'-'*(col)}^"
 		
 		# DEBUG
 		#pre += f"\n{self.src[pos:]}"
@@ -248,40 +262,36 @@ class Lexer:
 		g = m.groups()
 		
 		# Named matches are included in .groups() so we need to explicitly
-		#  skip them
-		skip = TOKEN.groupindex.values()
+		#  skip them, but they're 1-indexed
+		skip = [x - 1 for x in TOKEN.groupindex.values()]
 		
 		x = 0
 		for i in range(len(g)):
 			if i not in skip:
 				val = g[i]
-				if val: break
+				if val:
+					break
 				x += 1
 		
 		tt = NAMES[x]
 		
 		if tt in RADIX:
 			r = RADIX[tt]
-			if r != 10:
-				val = val[2:]
 			tt = "val"
 			val = int(val.replace("_", ""), r)
 		elif tt == "flt":
 			tt = "val"
 			val = float(val.replace("_", ""))
-		elif tt in {"sq", "dq", "bq"}:
+		elif tt in {"sq", "dq", "bq", "sq3", "dq3", "bq3"}:
 			tt = "str"
-			val = EspString(val[1:-1])
-		elif tt in {"sq3", "dq3", "bq3"}:
-			tt = "str"
-			val = EspString(val[3:-3])
+			val = EspString(val)
 		elif tt == "kw":
 			if val in KWALIASES:
 				tt = "op"
 				val = KWALIASES[val]
 		
 		# Tokens with no special postprocessing
-		elif tt in {"id", "kw", "op", "punc"}:
+		elif tt in {"id", "kw", "op", "cmp", "assign", "punc"}:
 			pass
 		else:
 			raise self.error(f"Unimplemented token {tt}:{val}")
@@ -293,26 +303,9 @@ class Lexer:
 		return ncur
 	
 	def consume(self):
-		'''LR(1) tokenization to derive meta-operators'''
+		'''Unconditionally consume the token and return the next one'''
 		
 		self.cur = self.next()
-		return self.cur
-		
-		if self.la:
-			self.cur = self.la
-			self.la = None
-		else:
-			self.cur = self.next()
-			
-			if self.cur and self.cur.value in PRECS:
-				self.la = self.next()
-				if self.la and self.la.value == "=":
-					self.cur.assign = True
-					self.la = None
-		
-		if self.cur and self.cur.value == "=":
-			self.cur.assign = True
-		
 		return self.cur
 	
 	def peek(self, value=None, type=None):
@@ -324,6 +317,7 @@ class Lexer:
 			return None
 		
 		if value:
+			# type is shadowed for clarity
 			if value.__class__ is set:
 				if self.cur.value in value:
 					return self.cur
@@ -331,8 +325,12 @@ class Lexer:
 				if self.cur.value == value:
 					return self.cur
 		else:
-			if self.cur.type == type:
-				return self.cur
+			if type.__class__ is set:
+				if self.cur.type in type:
+					return self.cur
+			else:
+				if self.cur.type == type:
+					return self.cur
 		
 		return None
 	
@@ -385,17 +383,14 @@ class Parser(Lexer):
 		 converted to a corresponding identifier, eg "+"
 		'''
 		
-		cur = self.cur
-		val = cur.value
-		ct = cur.type
+		tok = self.maybe(type={"id", "kw", "op", "cmp", "assign", "str"})
+		if not tok:
+			return None
 		
-		if ct in {"str", "id", "op"}:
-			self.consume()
-			return ast.Value(val).origin(cur)
+		if tok.type == "str":
+			return self.process_string(tok)
 		else:
-			x = self.atom()
-			if x: return x
-			raise self.expected(cur, "relaxed identifier")
+			return ast.Value(tok.value).origin(tok)
 	
 	def varlist(self):
 		'''
@@ -582,7 +577,7 @@ class Parser(Lexer):
 				op = "else"
 				val = None
 			else:
-				raise self.expected(cur, "case or else")
+				raise self.expected("case or else")
 			
 			# Immediate or fallthrough?
 			
@@ -692,7 +687,18 @@ class Parser(Lexer):
 		return ast.ListLiteral(vals).origin(cur)
 	
 	def parse_unary(self, cur):
-		return ast.Op(cur.value, ast.Value(EspNone), self.atom()).origin(cur)
+		op = cur.value
+		prec = PRECS[op]
+		
+		rhs = self.expr(prec)
+		
+		# Need to convert these to assignment
+		if op in {"--", "++"}:
+			val = ast.Assign(rhs, ast.Value(1), op[0])
+		else:
+			val = ast.Op(op, ast.Value(None), rhs)
+		
+		return val.origin(cur)
 	
 	def parse_loop(self, cur):
 		always = self.block()
@@ -775,7 +781,9 @@ class Parser(Lexer):
 		ct = cur.type
 		
 		# Exceptions which shouldn't be consumed
-		if val in {")", ";", "}", "]", "case", "else"}:
+		if ct == "punc" and val in {")", ";", "}", "]"}:
+			return None
+		elif ct == "kw" and ct in {"case", "else"}:
 			return None
 		
 		self.consume()
@@ -816,12 +824,6 @@ class Parser(Lexer):
 		elif ct == "kw":
 			if val == "if":
 				return self.parse_if(cur)
-			elif val == "none":
-				return ast.Value(EspNone).origin(cur)
-			elif val == "inf":
-				return ast.Value(float('inf')).origin(cur)
-			elif val == "nan":
-				return ast.Value(float('nan')).origin(cur)
 			elif val == "proto":
 				return self.parse_proto(cur)
 				
@@ -876,20 +878,6 @@ class Parser(Lexer):
 		
 		return lhs
 	
-	def index_chain(self):
-		'''Second-order atom parsing''' 
-		
-		lhs = self.atom()
-		
-		while True:
-			dot = self.maybe(".")
-			if not dot: break
-			
-			rhs = self.relaxid()
-			lhs = ast.Index(dot, lhs, [rhs])
-		
-		return lhs
-	
 	def block(self):
 		'''
 		Parses a "block", which is an expression which prioritizes curly-brace
@@ -913,66 +901,103 @@ class Parser(Lexer):
 			self.maybe(";")
 			return x
 	
-	def parse_call(self, lhs, cur):
-		args = self.listing(",", lambda: self.expr())
-		self.expect(")")
-		return  ast.Call(lhs, args).origin(cur)
-	
-	def parse_index(self, lhs, cur):
-		args = self.listing(":", lambda: self.expr())
-		self.expect("]")
+	def accessexpr(self, lhs, min_prec):
+		while self.cur:
+			cur = self.cur
+			op = cur.value
+			
+			if not self.peek({".", "->", "::"}):
+				break
+			
+			prec = PRECS[op]
+			if prec < min_prec:
+				break
+			
+			self.consume()
+			rhs = self.relaxid()
+			if not rhs:
+				raise self.expected("Relaxed identifier")
+			# Associativity logic is inverted because we parse rhs first
+			rhs = self.accessexpr(rhs, prec + 1)
+			if not rhs:
+				raise self.expected("rhs")
+			
+			if op == ".":
+				lhs = ast.Index(lhs, [rhs]).origin(cur)
+			elif op == "->":
+				lhs = ast.Bind(lhs, rhs).origin(cur)
+			elif op == "::":
+				lhs = ast.Descope(lhs, rhs).origin(cur)
+			else:
+				unreachable()
 		
-		return ast.Index(lhs, args).origin(cur)
+		return lhs
 	
 	def expr(self, min_prec=0):
 		'''
 		Uses precedence climbing
 		'''
 		
-		lhs = self.index_chain()
-		while self.cur is not None:
+		lhs = self.atom()
+		
+		while self.cur:
 			cur = self.cur
 			
+			# Calls and indexing are functionally equivalent to binary
+			# operators with a parenthesized rhs
 			if self.maybe("("):
-				lhs = self.parse_call(lhs, cur)
-				continue
+				args = self.listing(",", self.expr)
+				self.expect(")")
+				lhs = ast.Call(lhs, args).origin(cur)
 			
-			if self.maybe("["):
-				lhs = self.parse_index(lhs, cur)
-				continue
+			elif self.maybe("["):
+				args = self.listing(":", self.expr)
+				self.expect("]")
+				lhs = ast.Index(lhs, args).origin(cur)
 			
-			op = cur.value
-			if op.endswith('='):
-				op = None if op == '=' else op[:-1]
-				assign = True
+			# Accessor operators require special parsing because they allow
+			#  relaxed identifiers
+			elif self.peek({".", "->", "::"}):
+				prec = PRECS[cur.value]
+				if prec < min_prec:
+					break
+				
+				lhs = self.accessexpr(lhs, prec)
+			
 			else:
+				op = cur.value
 				assign = False
-			
-			if op and op not in PRECS:
-				break
-			
-			prec = PRECS['=' if assign else op]
-			if prec < min_prec:
-				break
-			
-			self.consume()
-			
-			next_min_prec = prec + (op not in RIGHT)
-			
-			rhs = self.expr(next_min_prec)
-			
-			if assign:
-				lhs = ast.Assign(lhs, rhs, op).origin(cur)
-			else:
-				if op == ",":
-					if type(lhs) is ast.Tuple:
-						lhs.append(rhs)
-					else:
-						lhs = ast.Tuple([lhs, rhs])
-				elif op == ".":
-					lhs = ast.Index(lhs, [rhs])
+				
+				if self.peek(type="assign"):
+					op = op[:-1]
+					assign = True
+				elif self.peek(type={"op", "cmp"}):
+					pass
 				else:
-					lhs = ast.Op(op, lhs, rhs)
+					break
+				
+				prec = PRECS['=' if assign else op]
+				if prec < min_prec:
+					break
+				
+				self.consume()
+				
+				rhs = self.expr(prec + (op not in RIGHT))
+				if not rhs:
+					break
+				
+				if assign:
+					lhs = ast.Assign(lhs, rhs, op).origin(cur)
+				else:
+					if op == ",":
+						if type(lhs) is ast.Tuple:
+							lhs.append(rhs)
+						else:
+							lhs = ast.Tuple([lhs, rhs])
+					elif op == ".":
+						lhs = ast.Index(lhs, [rhs])
+					else:
+						lhs = ast.Op(op, lhs, rhs)
 		
 		return lhs
 	

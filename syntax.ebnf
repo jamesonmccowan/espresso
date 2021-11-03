@@ -64,7 +64,7 @@ proto = "proto" [id] ["is" expr] "{" {
 tuple = {[expr] ","};
 call = expr "(" tuple ")" | id (string | object);
 
-literal = "inf" | "nan" | "none" | ident | string | function | list | object;
+literal = ident | string | function | list | object;
 
 expr = literal | "(" expr ")" | tuple | expr binop expr | unop expr | switch | statement;
 block = "{" {[id ":"] [statement] [";"]} "}" | expr;
@@ -93,3 +93,4 @@ assign = tuple {[op] "=" tuple};
 semi = expr {";" [expr]};
 
 postfix = index {postop};
+lvalue = pvalue | id "." relaxid

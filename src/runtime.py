@@ -34,6 +34,10 @@ class EspString(str):
 	
 	def __radd__(self, other):
 		return EspString(str(other) + str(self))
+	
+	@property
+	def length(self):
+		return len(self)
 
 class EspProto(type):
 	def __new__(cls, name, bases, ns):

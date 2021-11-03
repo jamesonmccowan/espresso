@@ -77,6 +77,21 @@ class ReturnSignal(Signal):
 	def __init__(self, value):
 		self.value = value
 
+runtime_global = {
+	"iter": iter,
+	"next": next,
+	"print": lambda *x: print(*x, end='') or EspNone,
+	"pyimport": __import__,
+	"none": EspNone,
+	"true": True,
+	"false": False,
+	"nan": float('nan'),
+	"inf": float('inf')
+}
+
+class LValueVisitor(Visitor):
+	'''Evaluate AST nodes as '''
+
 class EvalVisitor(Visitor):
 	def __init__(self):
 		self.stack = []
@@ -151,7 +166,7 @@ class EvalVisitor(Visitor):
 		return last
 	
 	def visit_return(self, v):
-		raise ReturnSignal(v)
+		raise ReturnSignal(v.visit(self))
 	
 	def visit_op(self, v):
 		#print(v.args)
@@ -193,20 +208,13 @@ class EvalVisitor(Visitor):
 		for x in v.elems:
 			next = x.visit(self)
 			
-			if isinstance(x, ast.Origin):
-				x = x.node
 			if not isinstance(x, ast.Statement):
 				last = next
 		
 		return last
 	
 	def visit_prog(self, v):
-		self.stack.append(StackFrame(None, {
-			"iter": iter,
-			"next": next,
-			"print": lambda *x: print(*x, end='') or EspNone,
-			"pyimport": __import__
-		}))
+		self.stack.append(StackFrame(None, runtime_global))
 		self.stack.append(StackFrame(v, {x:EspNone for x in v.vars}))
 		x = self.visit_block(v)
 		self.stack.pop()
@@ -249,10 +257,11 @@ class EvalVisitor(Visitor):
 			return obj[idx[0]]
 		else:'''
 		try:
-			return obj.__getitem__(idx)
-		except (AttributeError, KeyError):
+			return obj.__getitem__(*idx)
+		except (AttributeError, KeyError, TypeError) as e:
 			pass
 		
+		print(type(idx[0]), idx)
 		return getattr(obj, idx[0])
 	
 	def visit_objectliteral(self, v):
