@@ -679,3 +679,11 @@ Expression
 	Statement
 		Continuation (loop while for with)
 		Completion (if switch try )
+
+So take this expression from the newest test script:
+
+var random = loop R.uniform(-1, 1)
+
+So first, this is an expression (everything is)
+It's also a statement (meant to appear at the top of a block)
+It cannot auto-return or expose its value

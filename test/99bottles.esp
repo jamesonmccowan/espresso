@@ -1,5 +1,15 @@
+#*
+ * Traditional 99 bottles implementation with grammatical plurality
+ *
+ * Tests:
+ *  - Function declaration and calling
+ *  - Loops
+ *  - Variable assignment
+ *  - String interpolation
+ *#
+
 function howmany(x) {
-	"\{x or 'no more'} bottle\{'s'*(x != 1)} of beer"
+	"\{x || 'no more'} bottle\{'s'*(x != 1)} of beer"
 }
 
 var x = 99;

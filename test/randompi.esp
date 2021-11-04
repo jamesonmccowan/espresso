@@ -1,0 +1,28 @@
+#*
+ * Calculate pi using an infinite random number generator.
+ *
+ * Tests:
+ *  - pyimport
+ *  - Generators
+ *  - Loop generators
+ *  - Automatic return from functions
+ *  - loop-while
+ *#
+
+const R = pyimport("random");
+const PI = 3.141592653589793;
+
+function abs(x) if(x < 0) -x else x
+
+var random = loop R.uniform(-1, 1);
+
+var count = 0, within = 1;
+loop {
+	++count;
+	if((random()**2 + random()**2)**0.5 < 1) ++within;
+	
+	var badpi = 4*within/count;
+	#print(within, count, badpi, abs(PI - badpi) < 0.01, '\n');
+} while(abs(PI - badpi) > 0.01);
+
+print(4*within/count, '\n');

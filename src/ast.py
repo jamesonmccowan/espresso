@@ -672,10 +672,18 @@ class Block(Statement):
 		super().__init__()
 		vars = vars or []
 		
-		assert(is_expr(*elems))
 		assert(is_expr(*vars))
 		
-		self.elems = elems
+		se = []
+		
+		for e in elems:
+			if type(e) is Block:
+				se += e.elems
+				vars += e.vars
+			elif e is not None:
+				se.append(e)
+		
+		self.elems = se
 		self.vars = vars
 		self.lvalue = False
 	

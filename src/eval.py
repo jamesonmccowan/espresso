@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 
+import types
 from multimethod import multimeta
 import typing
 
 import ast
-from runtime import EspNone, EspProto, EspString, EspList, EspDict
+from runtime import EspNone, EspProto, EspString, EspList, EspDict, EspIterator
 
 class StackFrame:
 	def __init__(self, fn, vars):
@@ -54,13 +55,32 @@ SIMPLE_OPS = {
 	">>>": None
 }
 
-class Signal(Exception): pass
+class EspBaseException(BaseException): pass
+
+class Signal(EspBaseException): pass
 class BreakSignal(Signal): pass
 class ContinueSignal(Signal): pass
 
 class ReturnSignal(Signal):
 	def __init__(self, value):
 		self.value = value
+
+class EspException(EspBaseException): pass
+
+class SemanticError(EspException):
+	def __init__(self, origin, msg):
+		if origin:
+			p, l, c = origin.pos, origin.line, origin.col
+			msg += f" ({l}|{c}:{p})\n"
+			msg += origin.src.split('\n')[l - 1].replace('\t', ' ')
+			msg += f"\n{'-'*c}^"
+		
+		super().__init__(msg)
+		self.origin = origin
+
+class EspRefError(EspException):
+	def __init__(self, ref):
+		super().__init__(f"No such variable {ref!r}")
 
 runtime_global = {
 	"iter": iter,
@@ -103,17 +123,6 @@ class LValue:
 		setattr(self.obj, self.index[0], value)
 		return value
 
-class SemanticError(RuntimeError):
-	def __init__(self, origin, msg):
-		if origin:
-			p, l, c = origin.pos, origin.line, origin.col
-			msg += f" ({l}|{c}:{p})\n"
-			msg += origin.src.split('\n')[l - 1].replace('\t', ' ')
-			msg += f"\n{'-'*c}^"
-		
-		super().__init__(msg)
-		self.origin = origin
-
 class EvalVisitor(metaclass=multimeta):
 	def __init__(self):
 		self.stack = []
@@ -124,21 +133,33 @@ class EvalVisitor(metaclass=multimeta):
 			if name in v:
 				return v
 		
-		return self.stack[-1].vars
+		return None #self.stack[-1].vars
 	
 	def lvalue(self, x):
 		'''Evaluate x as an l-value'''
 		if not x.lvalue:
-			raise SemanticError(x.origin, "Not an l-value")
+			raise SemanticError(x.token, "Not an l-value")
 		
-		return self.lvisit(x)
+		try:
+			return self.lvisit(x)
+		except Exception as e:
+			if x.token:
+				raise SemanticError(x.token, e.args[0]) from e
+			else:
+				raise
 	
 	def rvalue(self, x):
 		'''Evaluate x as an r-value'''
 		if not x.rvalue:
-			raise SemanticError(x.origin, "Not an r-value")
+			raise SemanticError(x.token, "Not an r-value")
 		
-		return self.rvisit(x)
+		try:
+			return self.rvisit(x)
+		except Exception as e:
+			if x.token:
+				raise SemanticError(x.token, e.args[0]) from e
+			else:
+				raise
 	
 	def lvisit(self, v: ast.If):
 		x = v.th if self.rvalue(v.cond) else v.el
@@ -150,17 +171,18 @@ class EvalVisitor(metaclass=multimeta):
 			return self.rvalue(v.el) if v.el else EspNone
 	
 	def rvisit(self, v: ast.Loop):
-		ls = []
-		try:
-			while True:
-				try:
-					ls.append(self.rvalue(v.body))
-				except ContinueSignal:
-					pass
-				
-		except (BreakSignal, StopIteration):
-			self.rvalue(self) if v.el else EspNone
-			return ls
+		def iterloop():
+			try:
+				while True:
+					try:
+						yield self.rvalue(v.body)
+					except ContinueSignal:
+						pass
+					
+			except (BreakSignal, StopIteration):
+				return self.rvalue(self) if v.el else EspNone
+		
+		return EspIterator(iterloop())
 	
 	def rvisit(self, v: ast.Branch):
 		if v.kind == "break":
@@ -214,7 +236,11 @@ class EvalVisitor(metaclass=multimeta):
 		return v.value
 	
 	def lvisit(self, v: ast.Var):
+		lv = self.lookup(v.name)
+		if lv is None:
+			raise EspRefError(v.name)
 		return LValue(self.lookup(v.name), [v.name])
+	
 	def rvisit(self, v: ast.Var):
 		return self.lvalue(v).get()
 	
@@ -234,8 +260,6 @@ class EvalVisitor(metaclass=multimeta):
 			raise ValueError()
 		
 		if v.op:
-			#print(self.stack)
-			#print('var', v.name, v.op+'=', v.value)
 			old = var.get()
 			val = SIMPLE_OPS[v.op](old, self.rvalue(v.value))
 		else:
@@ -247,10 +271,7 @@ class EvalVisitor(metaclass=multimeta):
 	def rvisit(self, v: ast.Format):
 		s = ""
 		for p in v.parts:
-			if type(p) is str:
-				s += p
-			else:
-				s += self.rvalue(EspString(p))
+			s += EspString(self.rvalue(p))
 		
 		return s
 	
@@ -259,10 +280,19 @@ class EvalVisitor(metaclass=multimeta):
 		
 		last = EspNone
 		for x in v.elems:
-			next = self.rvalue(x)
+			tx = type(x)
 			
-			if not isinstance(x, ast.Statement):
-				last = next
+			if tx in {ast.Loop, ast.ForLoop}:
+				for x in self.rvalue(x):
+					pass
+				last = EspNone
+			else:
+				next = self.rvalue(x)
+				
+				if tx is ast.If:
+					last = next
+				elif not isinstance(x, ast.Statement):
+					last = next
 		
 		self.stack.pop()
 		return last
@@ -291,7 +321,13 @@ class EvalVisitor(metaclass=multimeta):
 			except ReturnSignal as ret:
 				return ret
 		
-		return pyfunc
+		return types.FunctionType(
+			pyfunc.__code__,
+			pyfunc.__globals__,
+			str(self.rvalue(v.name)), # Renaming the function
+			(EspNone,)*len(v.args), # Default arguments are all EspNone
+			pyfunc.__closure__
+		)
 	
 	def rvisit(self, v: ast.Call):
 		return self.rvalue(v.func)(*(self.rvalue(x) for x in v.args))
@@ -316,14 +352,13 @@ class EvalVisitor(metaclass=multimeta):
 		return EspList(self.rvalue(x) for x in v.values)
 	
 	def rvisit(self, v: ast.ForLoop):
-		# Doesn't account for destructuring
-		itvar = v.itvar.name
+		itvar = v.itvar
 		
-		it = self.rvalue(iter(v.toiter))
+		it = iter(self.rvalue(v.toiter))
 		
 		try:
 			while True:
-				self.lookup(itvar)[itvar] = next(it)
+				self.lvalue(itvar).set(next(it))
 				self.rvalue(v.body)
 				
 		except StopIteration:

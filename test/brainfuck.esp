@@ -1,4 +1,13 @@
-# Hello world in BF
+#*
+ * Standard Brainfuck interpreter with hello world
+ *
+ * Tests:
+ *  - Lists and list literals
+ *  - Indexing
+ *  - Unary ++ and --
+ *  - Method calls
+ *  - Switch-case
+ *#
 var src = "--[+++++++<---->>-->+>+>+<<<<]<.>++++[-<++++>>->--<<]>>-.>--..>+.<<<.<<-.>>+>->>.+++[.<]";
 
 var pc = 0, dp = 0, stack = [], data = [0];
@@ -17,8 +26,8 @@ while(pc < src.length) {
 				data.push(0);
 			}
 		}
-		case "+" => data[dp] = (data[dp] + 1)&0xff;
-		case '-' => data[dp] = (data[dp] - 1)&0xff;
+		case "+" => ++data[dp];
+		case '-' => --data[dp];
 		case '.' => print(char(data[dp]));
 		case "[" => stack.push(pc);
 		case "]" => {
@@ -26,4 +35,6 @@ while(pc < src.length) {
 			else stack.pop();
 		}
 	}
+	
+	data[dp] &= 0xff;
 }

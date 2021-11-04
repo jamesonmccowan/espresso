@@ -12,6 +12,7 @@ ap.add_argument('-t', '--tokens', help="Print the token stream", action="store_t
 ap.add_argument('-p', '--print', help="Print the AST", action="store_true")
 ap.add_argument('-r', '--raw', help="Print the raw representation", action="store_true")
 ap.add_argument('-x', '--exec', help="Execute the source (default if not printing)", action="store_true")
+ap.add_argument("-v", "--value", help="Output the return value of the program", action="store_true")
 
 def tokstream(src):
 	p = parse.Lexer(src)
@@ -47,7 +48,10 @@ def main():
 	
 	if args.exec or not args.print:
 		ev = eval.EvalVisitor()
-		pprint.pp(ev.visit(prog))
+		val = ev.visit(prog)
+		
+		if args.value or args.cmd:
+			pprint.pp(val)
 	
 	return
 

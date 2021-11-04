@@ -22,9 +22,9 @@ class ParseError(RuntimeError):
 KW = [
 	"if", "then", "else", "loop", "while", "do", "for",
 	"with", "switch", "case", "try", "after",
-	"return", "yield", "fail", "await", "break", "continue", "redo"
+	"return", "yield", "fail", "await", "break", "continue", "redo",
 	"proto", "struct", "function",
-	"async", "strict", "public", "private", "static", "var", "const"
+	"async", "strict", "public", "private", "static", "var", "const",
 	"this", "super",
 	"import", "export",
 	"new", "delete", "in", "is", "as", "has",
@@ -44,7 +44,7 @@ KWALIASES = {
 # Token regex, organized to allow them to be indexed by name
 PATS = {
 	# Syntax "operators" which require special parsing rules
-	"punc": r"[()\[\]{}]|\.|\.{3}|[,;:]|[-=]>",
+	"punc": r"[()\[\]{}]|\.(?!\.)|\.{3}|[,;:]|[-=]>",
 	"cmp": r"[!=]={1,2}|[<>!]=?|<>",
 	"assign": r"(?P<d0>[~*/%&|^:])(?P=d0)?=|=",
 	"op": "|".join([ # Ops can be contextual identifiers, puncs can't
@@ -66,7 +66,6 @@ PATS = {
 	"sq3": r"?:'''((?:\\.|.+?)*?)'''",
 	"dq3": r'?:"""((?:\\.|.+?)*?)"""',
 	"bq3": r"?:```((?:\\.|.+?)*?)```",
-	"kw": "|".join(KW),
 	"id": r"[\w_][\w\d]*"
 }
 # Operators which can't be overloaded because they encode syntax
@@ -162,6 +161,8 @@ def semiAsExpr(block):
 	'''
 	Convert a list of expressions to a single expression, possibly a Block
 	'''
+	block = list(filter(lambda x: x is not None, block))
+	
 	if len(block) == 0:
 		return ast.Value(None)
 	elif len(block) == 1:
@@ -270,11 +271,16 @@ class Lexer:
 		for i in range(len(g)):
 			if i not in skip:
 				val = g[i]
-				if val:
+				if val is not None:
 					break
 				x += 1
 		
-		tt = NAMES[x]
+		try:
+			tt = NAMES[x]
+		except IndexError:
+			# Common parsing issue, give us more context
+			print(x, m.groups())
+			raise
 		
 		if tt in RADIX:
 			r = RADIX[tt]
@@ -291,8 +297,12 @@ class Lexer:
 				tt = "op"
 				val = KWALIASES[val]
 		
+		elif tt == "id":
+			if val in KW:
+				tt = "kw"
+		
 		# Tokens with no special postprocessing
-		elif tt in {"id", "kw", "op", "cmp", "assign", "punc"}:
+		elif tt in {"op", "cmp", "assign", "punc"}:
 			pass
 		else:
 			raise self.error(f"Unimplemented token {tt}:{val}")
@@ -387,6 +397,7 @@ class Parser(Lexer):
 		self.consume()
 	
 	def addVar(self, var):
+		assert(ast.is_expr(var))
 		self.scope[-1].append(var)
 	
 	def lvalue(self):
@@ -661,7 +672,11 @@ class Parser(Lexer):
 			return ast.Format(parts).origin(cur)
 	
 	def parse_if(self, cur):
-		cond = self.expr()
+		if self.maybe("("):
+			cond = self.expr()
+			self.expect(")")
+		else:
+			cond = self.expr()
 		self.maybe("then")
 		
 		th = self.block()
@@ -709,10 +724,10 @@ class Parser(Lexer):
 			cond, bl, th, el = self.parse_while()
 			
 			return ast.Loop(ast.Block([
-				always, ast.If(cond, bl, th)
+				always, ast.If(cond, bl, semiAsExpr([th, ast.Branch("break")]))
 			]), el=el).origin(cur)
 		else:
-			return ast.Loop(cur, always).origin(cur)
+			return ast.Loop(always).origin(cur)
 	
 	def parse_for(self, cur):
 		self.expect("(")
@@ -767,11 +782,13 @@ class Parser(Lexer):
 		args = self.funcargs()
 		
 		block = self.block()
+		
 		func = ast.Func(name, args, block).origin(cur)
 		
 		if name:
-			self.addVar(name.value)
-			return ast.Assign(name, func).origin(cur)
+			v = ast.Var(str(name.value))
+			self.addVar(v)
+			return ast.Assign(v, func).origin(cur)
 		else:
 			return func
 	
@@ -786,7 +803,7 @@ class Parser(Lexer):
 		# Exceptions which shouldn't be consumed
 		if ct == "punc" and val in {")", ";", "}", "]"}:
 			return None
-		elif ct == "kw" and ct in {"case", "else"}:
+		elif ct == "kw" and val in {"case", "else"}:
 			return None
 		
 		self.consume()
@@ -896,9 +913,9 @@ class Parser(Lexer):
 			self.scope.pop()
 			self.expect("}")
 			if len(vars) > 0:
-				return semiAsExpr(b)
-			else:
 				return ast.Block(b, vars).origin(cur)
+			else:
+				return semiAsExpr(b)
 		else:
 			x = self.expr()
 			self.maybe(";")
