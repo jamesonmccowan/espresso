@@ -1,25 +1,10 @@
 #!/usr/bin/env python3
 
-from types import SimpleNamespace
+from multimethod import multimeta
+import typing
 
 import ast
-from runtime import EspNone, EspProto, EspString
-
-class Visitor:
-	def visit_const(self, v):
-		raise NotImplementedError(f"{type(self).__name__}.visit_const")
-	
-	def visit_var(self, v):
-		raise NotImplementedError(f"{type(self).__name__}.visit_var")
-	
-	def visit_sexp(self, v):
-		raise NotImplementedError(f"{type(self).__name__}.visit_sexp")
-	
-	def visit_block(self, v):
-		raise NotImplementedError(f"{type(self).__name__}.visit_block")
-	
-	def visit_prog(self, v):
-		raise NotImplementedError(f"{type(self).__name__}.visit_prog")
+from runtime import EspNone, EspProto, EspString, EspList, EspDict
 
 class StackFrame:
 	def __init__(self, fn, vars):
@@ -86,13 +71,50 @@ runtime_global = {
 	"true": True,
 	"false": False,
 	"nan": float('nan'),
-	"inf": float('inf')
+	"inf": float('inf'),
+	"char": chr
 }
 
-class LValueVisitor(Visitor):
-	'''Evaluate AST nodes as '''
+class LValue:
+	def __init__(self, obj, index):
+		self.obj = obj
+		self.index = index
+		
+		assert(type(index) == list)
+	
+	def get(self):
+		try:
+			return self.obj[self.index[0]]
+		except (AttributeError, KeyError, TypeError) as e:
+			pass
+		
+		if type(self.obj) == EspList:
+			print(self.obj[self.index[0]])
+		#print("getattr", type(self.obj), self.obj, self.index)
+		return getattr(self.obj, self.index[0])
+	
+	def set(self, value):
+		try:
+			self.obj[self.index[0]] = value
+			return value
+		except (AttributeError, KeyError, TypeError) as e:
+			pass
+		
+		setattr(self.obj, self.index[0], value)
+		return value
 
-class EvalVisitor(Visitor):
+class SemanticError(RuntimeError):
+	def __init__(self, origin, msg):
+		if origin:
+			p, l, c = origin.pos, origin.line, origin.col
+			msg += f" ({l}|{c}:{p})\n"
+			msg += origin.src.split('\n')[l - 1].replace('\t', ' ')
+			msg += f"\n{'-'*c}^"
+		
+		super().__init__(msg)
+		self.origin = origin
+
+class EvalVisitor(metaclass=multimeta):
 	def __init__(self):
 		self.stack = []
 	
@@ -104,26 +126,43 @@ class EvalVisitor(Visitor):
 		
 		return self.stack[-1].vars
 	
-	def visit_if(self, v):
-		if v.cond.visit(self):
-			return v.th.visit(self) if v.th else EspNone
-		else:
-			return v.el.visit(self) if v.el else EspNone
+	def lvalue(self, x):
+		'''Evaluate x as an l-value'''
+		if not x.lvalue:
+			raise SemanticError(x.origin, "Not an l-value")
+		
+		return self.lvisit(x)
 	
-	def visit_loop(self, v):
+	def rvalue(self, x):
+		'''Evaluate x as an r-value'''
+		if not x.rvalue:
+			raise SemanticError(x.origin, "Not an r-value")
+		
+		return self.rvisit(x)
+	
+	def lvisit(self, v: ast.If):
+		x = v.th if self.rvalue(v.cond) else v.el
+		return self.lvalue(x) if x else EspNone
+	def rvisit(self, v: ast.If):
+		if self.rvalue(v.cond):
+			return self.rvalue(v.th) if v.th else EspNone
+		else:
+			return self.rvalue(v.el) if v.el else EspNone
+	
+	def rvisit(self, v: ast.Loop):
 		ls = []
 		try:
 			while True:
 				try:
-					ls.append(v.body.visit(self))
+					ls.append(self.rvalue(v.body))
 				except ContinueSignal:
 					pass
 				
 		except (BreakSignal, StopIteration):
-			v.el.visit(self) if v.el else EspNone
+			self.rvalue(self) if v.el else EspNone
 			return ls
 	
-	def visit_branch(self, v):
+	def rvisit(self, v: ast.Branch):
 		if v.kind == "break":
 			raise BreakSignal()
 		elif v.kind == "continue":
@@ -131,13 +170,13 @@ class EvalVisitor(Visitor):
 		else:
 			raise NotImplementedError(v.kind)
 	
-	def visit_switch(self, v):
+	def rvisit(self, v: ast.Switch):
 		# Evaluate the expression to switch on
-		ex = v.ex.visit(self)
+		ex = self.rvalue(v.ex)
 		
 		# Find the case statement which matches
 		for case in v.cs:
-			val = case.value.visit(self)
+			val = self.rvalue(case.value)
 			
 			if case.op == "=":
 				if ex == val:
@@ -153,82 +192,100 @@ class EvalVisitor(Visitor):
 		try:
 			last = EspNone
 			while True:
-				last = case.body.visit(self)
+				last = self.rvalue(case.body)
 				
 				case = case.next
 				if case is None:
 					break
 		except BreakSignal:
-			last = v.el.visit(self)
+			last = self.rvalue(v.el)
 		except ContinueSignal:
-			last = v.th.visit(self)
+			last = self.rvalue(v.th)
 		
 		return last
 	
-	def visit_return(self, v):
-		raise ReturnSignal(v.visit(self))
+	def rvisit(self, v: ast.Return):
+		raise self.rvalue(ReturnSignal(v))
 	
-	def visit_op(self, v):
-		#print(v.args)
-		#print([repr(x.visit(self)) for x in v.args])
-		return SIMPLE_OPS[v.op](*(x.visit(self) for x in v.args))
+	def rvisit(self, v: ast.Op):
+		return SIMPLE_OPS[v.op](*(self.rvalue(x) for x in v.args))
 	
-	def visit_value(self, v):
+	def rvisit(self, v: ast.Value):
 		return v.value
 	
-	def visit_var(self, v):
-		return self.lookup(v.name)[v.name]
+	def lvisit(self, v: ast.Var):
+		return LValue(self.lookup(v.name), [v.name])
+	def rvisit(self, v: ast.Var):
+		return self.lvalue(v).get()
 	
-	def visit_assign(self, v):
-		# NOTE: This doesn't handle destructuring!
-		name = v.name.name
+	def lvisit(self, v: ast.After):
+		x = self.lvalue(v.value)
+		self.rvalue(v.update)
+		return x
+	def rvisit(self, v: ast.After):
+		x = self.rvalue(v.value)
+		self.rvalue(v.update)
+		return x
+	
+	def rvisit(self, v: ast.Assign):
+		var = self.lvalue(v.name)
+		if type(self.rvalue(v.value)) == list:
+			print("assign", var, v.value)
+			raise ValueError()
 		
 		if v.op:
 			#print(self.stack)
-			old = self.lookup(name)[name]
-			val = SIMPLE_OPS[v.op](old, v.value.visit(self))
+			#print('var', v.name, v.op+'=', v.value)
+			old = var.get()
+			val = SIMPLE_OPS[v.op](old, self.rvalue(v.value))
 		else:
-			val = v.value.visit(self)
+			val = self.rvalue(v.value)
 		
-		self.lookup(name)[name] = val
-		return val
+		x = var.set(val)
+		return x
 	
-	def visit_format(self, v):
+	def rvisit(self, v: ast.Format):
 		s = ""
 		for p in v.parts:
 			if type(p) is str:
 				s += p
 			else:
-				s += EspString(p.visit(self))
+				s += self.rvalue(EspString(p))
 		
 		return s
 	
 	def visit_block(self, v):
+		self.stack.append(StackFrame(v, {x.name:EspNone for x in v.vars}))
+		
 		last = EspNone
 		for x in v.elems:
-			next = x.visit(self)
+			next = self.rvalue(x)
 			
 			if not isinstance(x, ast.Statement):
 				last = next
 		
+		self.stack.pop()
 		return last
 	
-	def visit_prog(self, v):
+	def rvisit(self, v: ast.Block):
+		return self.visit_block(v)
+	
+	def rvisit(self, v: ast.Prog):
 		self.stack.append(StackFrame(None, runtime_global))
-		self.stack.append(StackFrame(v, {x:EspNone for x in v.vars}))
+		self.stack.append(StackFrame(v, {x.name:EspNone for x in v.vars}))
 		x = self.visit_block(v)
 		self.stack.pop()
 		self.stack.pop()
 		
 		return x
 	
-	def visit_func(self, v):
+	def rvisit(self, v: ast.Func):
 		def pyfunc(*args):
 			try:
 				self.stack.append(
 					StackFrame(v, dict(zip((x.name for x in v.args), args)))
 				)
-				val = v.body.visit(self)
+				val = self.rvalue(v.body)
 				self.stack.pop()
 				return val
 			except ReturnSignal as ret:
@@ -236,62 +293,48 @@ class EvalVisitor(Visitor):
 		
 		return pyfunc
 	
-	def visit_call(self, v):
-		return v.func.visit(self)(*(x.visit(self) for x in v.args))
+	def rvisit(self, v: ast.Call):
+		return self.rvalue(v.func)(*(self.rvalue(x) for x in v.args))
 	
-	def visit_proto(self, v):
-		p = (v.parent.visit(self),) if v.parent else ()
+	def rvisit(self, v: ast.Proto):
+		p = (self.rvalue(v.parent),) if v.parent else ()
 		return EspProto(v.name, p, {
 			"public": v.pub,
 			"private": v.priv,
 			"static": v.stat
 		})
 	
-	def visit_index(self, v):
-		obj = v.obj.visit(self)
-		idx = [x.visit(self) for x in v.indices]
-		'''
-		if len(idx) == 0:
-			return obj[None]
-		elif len(idx) == 1:
-			return obj[idx[0]]
-		else:'''
-		try:
-			return obj.__getitem__(*idx)
-		except (AttributeError, KeyError, TypeError) as e:
-			pass
-		
-		print(type(idx[0]), idx)
-		return getattr(obj, idx[0])
+	def lvisit(self, v: ast.Index):
+		return LValue(self.rvalue(v.obj), list(map(self.rvalue, v.indices)))
+	def rvisit(self, v: ast.Index):
+		return self.lvalue(v).get()
 	
-	def visit_objectliteral(self, v):
-		obj = {}
-		
-		for key, val in v.values:
-			obj[key.visit(self)] = val.visit(self)
-		
-		return obj
+	def rvisit(self, v: ast.ObjectLiteral):
+		return {self.rvalue(key):self.rvalue(val) for key, val in v.values}
 	
-	def visit_listliteral(self, v):
-		return [x.visit(self) for x in v.values]
+	def rvisit(self, v: ast.ListLiteral):
+		return EspList(self.rvalue(x) for x in v.values)
 	
-	def visit_forloop(self, v):
+	def rvisit(self, v: ast.ForLoop):
 		# Doesn't account for destructuring
 		itvar = v.itvar.name
 		
-		it = iter(v.toiter.visit(self))
+		it = self.rvalue(iter(v.toiter))
 		
 		try:
 			while True:
 				self.lookup(itvar)[itvar] = next(it)
-				v.body.visit(self)
+				self.rvalue(v.body)
 				
 		except StopIteration:
-			v.th.visit(self) if v.th else EspNone
+			self.rvalue(v.th) if v.th else EspNone
 		
 		except BreakSignal:
-			v.el.visit(self) if v.el else EspNone
+			self.rvalue(v.el) if v.el else EspNone
 		
 		# This is incorrect but I'm too tired to do it right (which would
 		#  require proper refactoring to support generators)
 		return EspNone
+	
+	def visit(self, v):
+		return self.rvalue(v)

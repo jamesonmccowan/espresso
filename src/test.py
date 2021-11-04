@@ -47,7 +47,7 @@ def main():
 	
 	if args.exec or not args.print:
 		ev = eval.EvalVisitor()
-		pprint.pp(prog.visit(ev))
+		pprint.pp(ev.visit(prog))
 	
 	return
 

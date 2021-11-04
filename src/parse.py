@@ -21,7 +21,7 @@ class ParseError(RuntimeError):
 
 KW = [
 	"if", "then", "else", "loop", "while", "do", "for",
-	"with", "switch", "case", "try", "finally",
+	"with", "switch", "case", "try", "after",
 	"return", "yield", "fail", "await", "break", "continue", "redo"
 	"proto", "struct", "function",
 	"async", "strict", "public", "private", "static", "var", "const"
@@ -31,7 +31,7 @@ KW = [
 	"and", "or", "not", "xor"
 	
 	# Implemented as global constants
-	#"none", "inf", "nan",
+	#"none", "inf", "nan", "true", "false"
 ]
 
 KWALIASES = {
@@ -45,8 +45,8 @@ KWALIASES = {
 PATS = {
 	# Syntax "operators" which require special parsing rules
 	"punc": r"[()\[\]{}]|\.|\.{3}|[,;:]|[-=]>",
-	"cmp": r"[!=]={,2}|[<>!]=?|<>",
-	"assign": r"(?:(?P<d0>[~*/%&|^:])(?P=d0)?)?=",
+	"cmp": r"[!=]={1,2}|[<>!]=?|<>",
+	"assign": r"(?P<d0>[~*/%&|^:])(?P=d0)?=|=",
 	"op": "|".join([ # Ops can be contextual identifiers, puncs can't
 		r"[@~?]", # Misc syntax
 		r"[-=]>", # Arrows
@@ -59,7 +59,7 @@ PATS = {
 	"oct": r"?:0o([_0-7]*[0-7])",
 	"hex": r"?:0x([_\da-fA-F]*[\da-fA-F])",
 	"flt": r"(?:\.\d[_\d]*|\d[_\d]*\.(?!\.)(?:\d[_\d]*)?)(?:e[-+]\d[_\d]*)?",
-	"dec": r"\d+",
+	"dec": r"\d(?:[\d_]*\d)?",
 	"sq": r"?:'((?:\\.|.+?)*?)'",
 	"dq": r'?:"((?:\\.|.+?)*?)"',
 	"bq": r"?:`((?:\\.|.+?)*?)`",
@@ -103,7 +103,7 @@ PRECS = dict(build_precs([
 	["*", "/", "%"], # Multiplicative
 	["**", "//", "%%"], # Exponential
 	["++", "--"],
-	['.', '->', ":"],
+	['.', '->', "::"],
 	[":"]
 	# Tightest binding strength
 ]))
@@ -135,7 +135,8 @@ SPACE = re.compile(r"\s+", re.M)
 WORD = re.compile(r'\S+')
 
 class Token:
-	def __init__(self, v, t, p, l, c):
+	def __init__(self, src, v, t, p, l, c):
+		self.src = src
 		self.value = v
 		self.type = t
 		self.pos = p
@@ -296,7 +297,7 @@ class Lexer:
 		else:
 			raise self.error(f"Unimplemented token {tt}:{val}")
 		
-		ncur = Token(val, tt, self.pos, self.line, self.col)
+		ncur = Token(self.src, val, tt, self.pos, self.line, self.col)
 		
 		self.repos(m)
 		
@@ -313,8 +314,31 @@ class Lexer:
 		Peek at the next token without consuming it, returning the token or None
 		'''
 		
-		if self.cur is None:
+		cur = self.cur
+		if cur is None:
 			return None
+		
+		v = cur.value
+		if value:
+			if value.__class__ is set:
+				if v not in value:
+					return None
+			else:
+				if v != value:
+					return None
+		
+		t = cur.type
+		if type:
+			if type.__class__ is set:
+				if t not in type:
+					return None
+			else:
+				if t != type:
+					return None
+		
+		return self.cur
+		
+		return self.cur if predicate(self.cur) else None
 		
 		if value:
 			# type is shadowed for clarity
@@ -391,29 +415,6 @@ class Parser(Lexer):
 			return self.process_string(tok)
 		else:
 			return ast.Value(tok.value).origin(tok)
-	
-	def varlist(self):
-		'''
-		Parses a list of variables, possibly with defaults and unpacking
-		'''
-		
-		vl = []
-		
-		while True:
-			name = self.lvalue()
-			
-			# Todo: Type annotation using :
-			
-			tok = self.maybe("=")
-			if tok:
-				name = ast.Assign(name, self.expr()).origin(tok)
-			
-			vl.append(name)
-			
-			if not self.maybe(","):
-				break
-		
-		return vl
 	
 	def listing(self, sep, pat):
 		v = []
@@ -687,6 +688,7 @@ class Parser(Lexer):
 		return ast.ListLiteral(vals).origin(cur)
 	
 	def parse_unary(self, cur):
+		'''Prefix unary''' 
 		op = cur.value
 		prec = PRECS[op]
 		
@@ -729,10 +731,10 @@ class Parser(Lexer):
 	def parse_decl(self, cur):
 		'''
 		Var declarations are split into two separate concerns,
-			variable name hoisting to the innermost enclosing
-			scope and assignment of the variable at the correct
-			point (by returning assignments as a group of
-			assignment s-exprs)
+		 variable name hoisting to the innermost enclosing
+		 scope and assignment of the variable at the correct
+		 point (by returning assignments as a group of
+		 assignment s-exprs)
 		'''
 		
 		mut = (cur.value != "const")
@@ -753,7 +755,8 @@ class Parser(Lexer):
 			
 			if not self.maybe(","):
 				break
-		return semiAsExpr(group)
+		
+		return group
 	
 	def parse_funcliteral(self, cur):
 		name = None
@@ -851,7 +854,7 @@ class Parser(Lexer):
 				# Todo: targeted branches
 			
 			elif val in {"var", "const"}:
-				return self.parse_decl(cur)
+				return semiAsExpr(self.parse_decl(cur))
 			
 			elif val == "function":
 				return self.parse_funcliteral(cur)
@@ -942,7 +945,6 @@ class Parser(Lexer):
 		
 		while self.cur:
 			cur = self.cur
-			
 			# Calls and indexing are functionally equivalent to binary
 			# operators with a parenthesized rhs
 			if self.maybe("("):
@@ -962,7 +964,19 @@ class Parser(Lexer):
 				if prec < min_prec:
 					break
 				
+				# Don't consume the token here, accessexpr will do it
 				lhs = self.accessexpr(lhs, prec)
+			
+			# Postfix operators
+			elif self.peek({"++", "--"}):
+				# Disable for continuation statements
+				if type(lhs) in {ast.If, ast.Loop}:
+					break
+				
+				self.consume()
+				lhs = ast.After(
+					lhs, ast.Assign(lhs, ast.Value(1), "+")
+				).origin(cur)
 			
 			else:
 				op = cur.value
@@ -1009,10 +1023,14 @@ class Parser(Lexer):
 		
 		st = []
 		while self.cur is not None:
-			x = self.expr()
-			if x is None:
-				break
-			st.append(x)
+			cur = self.cur
+			if self.maybe({"var", "const"}, type="kw"):
+				st += self.parse_decl(cur)
+			else:
+				x = self.expr()
+				if x is None:
+					break
+				st.append(x)
 			
 			while self.maybe(";"):
 				pass

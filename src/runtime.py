@@ -75,7 +75,7 @@ class EspList(list):
 		if type(x) is int:
 			if x > len(self):
 				return EspNone
-			return super()[x]
+			return super().__getitem__(x)
 		return getattr(self, x)
 	
 	def push(self, x):
@@ -88,3 +88,18 @@ class EspList(list):
 		x = self[0]
 		del self[0]
 		return x
+	
+	def __add__(self, other):
+		return EspList(super().__add__(other))
+	
+	def __iadd__(self, other):
+		return EspList(super().__iadd__(other))
+	
+	def __mul__(self, other):
+		return EspList(super().__mul__(other))
+	
+	def __rmul__(self, other):
+		return EspList(super().__rmul__(other))
+
+"""
+'__add__', '__class__', '__contains__', '__delattr__', '__delitem__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getitem__', '__gt__', '__hash__', '__iadd__', '__imul__', '__init__', '__init_subclass__', '__iter__', '__le__', '__len__', '__lt__', '__mul__', '__ne__', '__new__', '__reduce__', '__reduce_ex__', '__repr__', '__reversed__', '__rmul__', '__setattr__', '__setitem__', '__sizeof__', '__str__', '__subclasshook__', 'append', 'clear', 'copy', 'count', 'extend', 'index', 'insert', 'pop', 'remove', 'reverse', 'sort'"""

@@ -1,9 +1,10 @@
 # Hello world in BF
 var src = "--[+++++++<---->>-->+>+>+<<<<]<.>++++[-<++++>>->--<<]>>-.>--..>+.<<<.<<-.>>+>->>.+++[.<]";
 
-var pc = 0, dp = 0, stack = [], data = [0]*1024;
+var pc = 0, dp = 0, stack = [], data = [0];
 
 while(pc < src.length) {
+	#print(src[pc], pc, dp, stack, data, '\n');
 	switch(src[pc++]) {
 		case "<" => {
 			if(dp == 0) {
@@ -12,15 +13,17 @@ while(pc < src.length) {
 			else --dp;
 		}
 		case ">" => {
-			if(dp > data.length) {
+			if(++dp >= data.length) {
 				data.push(0);
 			}
-			++dp;
 		}
-		case "+" => ++data[dp];
-		case '-' => --data[dp];
+		case "+" => data[dp] = (data[dp] + 1)&0xff;
+		case '-' => data[dp] = (data[dp] - 1)&0xff;
 		case '.' => print(char(data[dp]));
 		case "[" => stack.push(pc);
-		case "]" => pc = stack.pop();
+		case "]" => {
+			if(data[dp]) pc = stack[-1];
+			else stack.pop();
+		}
 	}
 }

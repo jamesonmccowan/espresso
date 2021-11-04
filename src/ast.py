@@ -157,7 +157,7 @@ class Var(Expr):
 		self.mutable = mutable
 	
 	def __str__(self):
-		return sexp(self.name)
+		return sexp(self)
 	
 	def __repr__(self):
 		if self.mutable:
@@ -201,7 +201,7 @@ class Assign(Statement):
 		self.op = op
 	
 	def __str__(self):
-		return sexp((f"{self.op or ''}=", self.name, self.value))
+		return sexp((f"assign{self.op or ''}=", self.name, self.value))
 	
 	def __repr__(self):
 		if self.op:
@@ -274,6 +274,25 @@ class Index(Expr):
 	
 	def sexp(self):
 		return (".", self.obj, [*self.indices])
+
+class After(Expr):
+	def __init__(self, value, update):
+		super().__init__()
+		assert(is_expr(value))
+		assert(is_expr(update))
+		if type(value) is If:
+			raise ValueError()
+		self.value = value
+		self.update = update
+	
+	def __str__(self):
+		return sexp(("after", self.value, self.update))
+	
+	def __repr__(self):
+		return f"After({self.value!r}, {self.update!r})"
+	
+	def sexp(self):
+		return ("after", self.value, self.update)
 
 class Bind(Expr):
 	'''Binding operator ->'''
@@ -664,7 +683,7 @@ class Block(Statement):
 		#v = [x for x in self.vars if x.mutable]
 		#c = [x for x in self.vars if not x.mutable]
 		return sexp(("block",
-			self.vars and tuple(["var", *self.vars]),
+			self.vars,
 			...,
 			#c and tuple(["const", *c]),
 			*self.elems
@@ -674,7 +693,7 @@ class Block(Statement):
 		return f"Block({self.elems!r}, {self.vars!r})"
 	
 	def sexp(self):
-		return ("block", self.vars and tuple(["var", *self.vars]), ...,
+		return ("block", self.vars, ...,
 			#c and tuple(["const", *c]),
 			*self.elems
 		)
@@ -705,44 +724,3 @@ class Func(Expr):
 	
 	def sexp(self):
 		return ("function", self.name, self.args, ..., self.body)
-
-class PrettyPrinter:
-	@multimethod
-	def visit(self, v: str):
-		return color_op%v
-	
-	@multimethod
-	def visit(self, v: Var):
-		return color_var%v.name
-	
-	@multimethod
-	def visit(self, v: Value):
-		if type(v.value) is str:
-			return color_str%repr(v.value)
-		else:
-			return color_num%v.value
-	
-	@multimethod
-	def visit(self, v: list):
-		return color_list%f"[{join(' ', (sexp(x) for x in v))}]"
-	
-	@multimethod
-	def visit(self, v: tuple):
-		before = []
-		after = []
-		nl = False
-		
-		for x in v:
-			if x == ...:
-				nl = True
-			elif nl:
-				after.append(self.visit(x))
-			else:
-				before.append(self.visit(x))
-		
-		b = join(' ', before)
-		if nl:
-			a = join('\n', after)
-			return f"({b}\n{indent(a)})"
-		else:
-			return f"({b})"

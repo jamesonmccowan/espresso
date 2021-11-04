@@ -655,3 +655,27 @@ Assignments: any mutating operator, x = y, x += y, ++y, etc
 Basically anything with side effects. This definition would include function calls, which is somewhat problematic... so have a "none" return type ignore any implicit returns
 
 There are also empty statements, as in ;; which forward the previous value. If there is no previous value eg (;) then `none` is assumed. Note that this is not an empty tuple because the inclusion of the semicolon operator makes this a sequential evaluation.
+
+While implementing the parser I came across a nasty bit of ambiguity. The ++ and -- operators are the only pure unary operators which have side effects. Ordinarily the binding of unary operators with the previous line isn't much of an issue because expressions don't appear on their own, or lhs of an assignment. Eg +x = 10 isn't ever going to happen because +x is rvalue, and +x alone won't happen because it has no side effects. But for ++ and --, if the prefix form is used right after a statement it will usually coerce the statement into an expression with postfix form.
+
+if(cond) { xxx }
+++x;
+
+will parse as (if(cond) { xxx} ++) x; because the parser is greedy and we usually don't append semicolons to blocks
+
+So we may need to make some expression type distinctions. This is an unlikely valid parse, but one we can't rule out either because we could imagine something like
+
+if(cond) { x } else { y }++ which conditionally increments either x or y (the if expression is itself an lvalue)
+
+So naive distinction, expression v statement. Certain operators like ++ and -- may be disallowed from binding to statements, but statements can always be made into expressions by wrapping them in parentheses
+
+Another distinction we want to make though is auto-returning. Loops in expression form create generators, which would be very bad if they were the last statement in a function body. Then the generator would be returned, probably ignored, and the loop would remain unexecuted. On the other hand there are statements we'd want to return automatically like if-else and switch.
+
+In JS this is called "statement completion value". Statements which aren't valid expressions evaluate (literally within eval) to a special "empty" value which forwards earlier values. So eval("var x = 10; x = 4; var y = 30") == 4, because variable declarations are empty and the last non-empty expression was 4
+
+Let's call the two types of statements completion and continuation
+
+Expression
+	Statement
+		Continuation (loop while for with)
+		Completion (if switch try )
