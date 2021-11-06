@@ -46,6 +46,11 @@ export function every(this, predicate): bool {
 	return true;
 }
 
+export function range(x, y, inc=1) {
+	var i = x;
+	return loop i += inc while(i < y);
+}
+
 return function iter(this) {
 	return this.iter();
 }

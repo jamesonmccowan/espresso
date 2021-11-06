@@ -6,6 +6,7 @@ import typing
 
 import ast
 from runtime import EspNone, EspProto, EspString, EspList, EspDict, EspIterator
+import common
 
 class StackFrame:
 	def __init__(self, fn, vars):
@@ -138,26 +139,26 @@ class EvalVisitor(metaclass=multimeta):
 	def lvalue(self, x):
 		'''Evaluate x as an l-value'''
 		if not x.lvalue:
-			raise SemanticError(x.token, "Not an l-value")
+			raise SemanticError(x.origin, f"{x} is not an l-value")
 		
 		try:
 			return self.lvisit(x)
 		except Exception as e:
-			if x.token:
-				raise SemanticError(x.token, e.args[0]) from e
+			if x.origin:
+				raise SemanticError(x.origin, e.args[0]) from e
 			else:
 				raise
 	
 	def rvalue(self, x):
 		'''Evaluate x as an r-value'''
 		if not x.rvalue:
-			raise SemanticError(x.token, "Not an r-value")
+			raise SemanticError(x.origin, f"{x} is not an r-value")
 		
 		try:
 			return self.rvisit(x)
 		except Exception as e:
-			if x.token:
-				raise SemanticError(x.token, e.args[0]) from e
+			if x.origin:
+				raise SemanticError(x.origin, e.args[0]) from e
 			else:
 				raise
 	
@@ -171,7 +172,7 @@ class EvalVisitor(metaclass=multimeta):
 			return self.rvalue(v.el) if v.el else EspNone
 	
 	def rvisit(self, v: ast.Loop):
-		def iterloop():
+		def loopiter(self, v):
 			try:
 				while True:
 					try:
@@ -182,7 +183,13 @@ class EvalVisitor(metaclass=multimeta):
 			except (BreakSignal, StopIteration):
 				return self.rvalue(self) if v.el else EspNone
 		
-		return EspIterator(iterloop())
+		it = loopiter(self, v)
+		if v.statement:
+			for x in it:
+				pass
+			return EspNone
+		else:
+			return EspIterator(it)
 	
 	def rvisit(self, v: ast.Branch):
 		if v.kind == "break":
@@ -276,48 +283,30 @@ class EvalVisitor(metaclass=multimeta):
 		return s
 	
 	def visit_block(self, v):
-		self.stack.append(StackFrame(v, {x.name:EspNone for x in v.vars}))
+		frame = StackFrame(v, {x.name:EspNone for x in v.vars})
+		with common.stack(self.stack, frame):
+			last = EspNone
+			for x in v.elems:
+				last = self.rvalue(x)
 		
-		last = EspNone
-		for x in v.elems:
-			tx = type(x)
-			
-			if tx in {ast.Loop, ast.ForLoop}:
-				for x in self.rvalue(x):
-					pass
-				last = EspNone
-			else:
-				next = self.rvalue(x)
-				
-				if tx is ast.If:
-					last = next
-				elif not isinstance(x, ast.Statement):
-					last = next
-		
-		self.stack.pop()
 		return last
 	
 	def rvisit(self, v: ast.Block):
 		return self.visit_block(v)
 	
 	def rvisit(self, v: ast.Prog):
-		self.stack.append(StackFrame(None, runtime_global))
-		self.stack.append(StackFrame(v, {x.name:EspNone for x in v.vars}))
-		x = self.visit_block(v)
-		self.stack.pop()
-		self.stack.pop()
-		
-		return x
+		global_frame = StackFrame(None, runtime_global)
+		main_frame = StackFrame(v, {x.name:EspNone for x in v.vars})
+		with common.stack(self.stack, global_frame):
+			with common.stack(self.stack, main_frame):
+				return self.visit_block(v)
 	
 	def rvisit(self, v: ast.Func):
 		def pyfunc(*args):
 			try:
-				self.stack.append(
-					StackFrame(v, dict(zip((x.name for x in v.args), args)))
-				)
-				val = self.rvalue(v.body)
-				self.stack.pop()
-				return val
+				frame = StackFrame(v, dict(zip((x.name for x in v.args), args)))
+				with common.stack(self.stack, frame):
+					return self.rvalue(v.body)
 			except ReturnSignal as ret:
 				return ret
 		
@@ -352,24 +341,29 @@ class EvalVisitor(metaclass=multimeta):
 		return EspList(self.rvalue(x) for x in v.values)
 	
 	def rvisit(self, v: ast.ForLoop):
-		itvar = v.itvar
+		def foriter(self, v):
+			itvar = v.itvar
+			
+			it = iter(self.rvalue(v.toiter))
+			
+			try:
+				while True:
+					self.lvalue(itvar).set(next(it))
+					yield self.rvalue(v.body)
+					
+			except StopIteration:
+				return self.rvalue(v.th) if v.th else EspNone
+			
+			except BreakSignal:
+				return self.rvalue(v.el) if v.el else EspNone
 		
-		it = iter(self.rvalue(v.toiter))
-		
-		try:
-			while True:
-				self.lvalue(itvar).set(next(it))
-				self.rvalue(v.body)
-				
-		except StopIteration:
-			self.rvalue(v.th) if v.th else EspNone
-		
-		except BreakSignal:
-			self.rvalue(v.el) if v.el else EspNone
-		
-		# This is incorrect but I'm too tired to do it right (which would
-		#  require proper refactoring to support generators)
-		return EspNone
+		it = foriter(self, v)
+		if v.statement:
+			for v in it:
+				pass
+			return EspNone
+		else:
+			return EspIterator(it)
 	
 	def visit(self, v):
 		return self.rvalue(v)

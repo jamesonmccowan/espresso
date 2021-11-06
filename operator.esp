@@ -1,3 +1,14 @@
+function is(lhs, rhs) {
+	return? lhs === rhs;
+	
+	if(rhs.proto::is === none)
+		rhs->rhs.proto::is(lhs, rhs);
+	else if(lhs.proto::is === none)
+		lhs->lhs.proto::is(lhs, rhs);
+	else
+		lhs.proto === rhs;
+}
+
 inline strict function $_applyop(op: string, x, y) {
 	if(typeof x === object) {
 		var xx = x as object;

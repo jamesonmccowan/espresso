@@ -6,6 +6,8 @@ import ast
 from typing import *
 from runtime import EspString, EspNone, EspDict, EspList
 
+import common
+
 def unreachable(msg=None):
 	if msg:
 		raise AssertionError(msg)
@@ -92,10 +94,10 @@ PRECS = dict(build_precs([
 	[',', ":"],
 	['..', '...'],
 	['()', '[]', "{}"],
-	*separate("||", "^^", "&&"),
-	*separate("|", "^", "&"),
 	["==", "!=", "===", "!=="],
 	["<", "<=", ">", ">=", "<>"],
+	*separate("||", "^^", "&&"),
+	*separate("|", "^", "&"),
 	["<<", "<<<", "<<>", "<>>", ">>>", ">>"],
 	*separate("!", "~"),
 	["+", "-"], # Additive
@@ -127,8 +129,7 @@ RADIX = {
 
 NAMES = list(PATS.keys())
 TOKEN = re.compile(f"({')|('.join(PATS.values())})", re.M)
-COMMENT = re.compile(r"\s*(#\*(?:.|\n)+\*#\s*|#\{|#.*$)", re.M)
-RECURSIVE_COMMENT = re.compile(r"#\{|#\}", re.M)
+COMMENT = re.compile(r"\s*(#\*(?:.|\n)+\*#\s*|#.*$)", re.M)
 NEWLINE = re.compile("\n")
 SPACE = re.compile(r"\s+", re.M)
 WORD = re.compile(r'\S+')
@@ -238,17 +239,6 @@ class Lexer:
 			if comment is None: break
 			
 			self.repos(comment)
-			# Recursive comment parsing
-			if comment[1] == "#{":
-				level = 1
-				while True:
-					m = self.match(RECURSIVE_COMMENT)
-					if m is None:
-						raise self.error("Unexpected EOF")
-					if m[0] == "#{":
-						level += 1
-					else: # }#
-						level -= 1
 		
 		# Clean up ordinary space without comments
 		m = self.match(SPACE)
@@ -264,7 +254,7 @@ class Lexer:
 		g = m.groups()
 		
 		# Named matches are included in .groups() so we need to explicitly
-		#  skip them, but they're 1-indexed
+		#  skip them - they're 1-indexed
 		skip = [x - 1 for x in TOKEN.groupindex.values()]
 		
 		x = 0
@@ -292,14 +282,13 @@ class Lexer:
 		elif tt in {"sq", "dq", "bq", "sq3", "dq3", "bq3"}:
 			tt = "str"
 			val = EspString(val)
-		elif tt == "kw":
-			if val in KWALIASES:
-				tt = "op"
-				val = KWALIASES[val]
-		
 		elif tt == "id":
 			if val in KW:
 				tt = "kw"
+				
+				if val in KWALIASES:
+					tt = "op"
+					val = KWALIASES[val]
 		
 		# Tokens with no special postprocessing
 		elif tt in {"op", "cmp", "assign", "punc"}:
@@ -319,54 +308,32 @@ class Lexer:
 		self.cur = self.next()
 		return self.cur
 	
-	def peek(self, value=None, type=None):
+	def peek(self, value=None, type=None) -> Union[Token, None]:
 		'''
 		Peek at the next token without consuming it, returning the token or None
+		
+		You can check for either value or token or both, if they're both None
+		then it returns self.cur
 		'''
 		
 		cur = self.cur
-		if cur is None:
+		if cur is None or value is None and type is None:
 			return None
 		
-		v = cur.value
-		if value:
-			if value.__class__ is set:
-				if v not in value:
-					return None
+		# if set, check if it's in the set. Otherwise check equality
+		def in_or_eq(value, desc):
+			if desc is not None:
+				if isinstance(desc, set):
+					return value in desc
+				else:
+					return value == desc
 			else:
-				if v != value:
-					return None
+				return True
 		
-		t = cur.type
-		if type:
-			if type.__class__ is set:
-				if t not in type:
-					return None
-			else:
-				if t != type:
-					return None
-		
-		return self.cur
-		
-		return self.cur if predicate(self.cur) else None
-		
-		if value:
-			# type is shadowed for clarity
-			if value.__class__ is set:
-				if self.cur.value in value:
-					return self.cur
-			else:
-				if self.cur.value == value:
-					return self.cur
+		if in_or_eq(cur.value, value) and in_or_eq(cur.type, type):
+			return self.cur
 		else:
-			if type.__class__ is set:
-				if self.cur.type in type:
-					return self.cur
-			else:
-				if self.cur.type == type:
-					return self.cur
-		
-		return None
+			return None
 	
 	def maybe(self, value=None, type=None):
 		'''
@@ -410,7 +377,7 @@ class Parser(Lexer):
 		if x.lvalue:
 			return x
 		else:
-			raise self.error(x.token, "Not an l-value")
+			raise self.error(x.origin, "Not an l-value")
 	
 	def relaxid(self):
 		'''
@@ -425,7 +392,7 @@ class Parser(Lexer):
 		if tok.type == "str":
 			return self.process_string(tok)
 		else:
-			return ast.Value(tok.value).origin(tok)
+			return ast.Value(tok.value).set_origin(tok)
 	
 	def listing(self, sep, pat):
 		v = []
@@ -449,6 +416,14 @@ class Parser(Lexer):
 		else:
 			return [args]
 	
+	def condition(self):
+		if self.maybe("("):
+			ex = self.expr()
+			self.expect(")")
+			return ex
+		else:
+			return self.expr()
+	
 	def parse_objectliteral(self, cur):
 		obj = []
 		
@@ -470,7 +445,7 @@ class Parser(Lexer):
 			else:
 				raise self.error(tok, f"Unknown token {tok!r}")
 			
-			key = key.origin(tok)
+			key = key.set_origin(tok)
 			
 			self.consume()
 			
@@ -478,7 +453,7 @@ class Parser(Lexer):
 				# Object method
 				functok = self.cur
 				args = self.funcargs()
-				value = ast.Func(key, args, self.block()).origin(functok)
+				value = ast.Func(key, args, self.block()).set_origin(functok)
 			elif self.maybe(":"):
 				# Normal property
 				value = self.expr()
@@ -491,7 +466,7 @@ class Parser(Lexer):
 			# Should commas be optional?
 			self.maybe(",")
 		
-		return ast.ObjectLiteral(obj).origin(cur)
+		return ast.ObjectLiteral(obj).set_origin(cur)
 	
 	def parse_proto(self, cur):
 		# TODO: anonymous proto
@@ -519,9 +494,9 @@ class Parser(Lexer):
 				
 				body = self.block()
 				
-				members = [ast.Func(member.value, params, body).origin(member)]
+				members = [ast.Func(member.value, params, body).set_origin(member)]
 			else:
-				members = [ast.Var(member.value).origin(member)]
+				members = [ast.Var(member.value).set_origin(member)]
 				
 				while self.maybe(","):
 					mem = self.maybe(type="id")
@@ -543,7 +518,7 @@ class Parser(Lexer):
 		
 		name = name.value if name else None
 		
-		p = ast.Proto(name, parent, pub, priv, stat).origin(cur)
+		p = ast.Proto(name, parent, pub, priv, stat).set_origin(cur)
 		
 		if name is None:
 			return p
@@ -554,7 +529,7 @@ class Parser(Lexer):
 	
 	def parse_while(self):
 		# "while" token already consumed
-		cond = self.expr()
+		cond = self.condition()
 		bl = self.block()
 		
 		th, el = self.then_else()
@@ -564,7 +539,7 @@ class Parser(Lexer):
 	def parse_switch(self, cur):
 		swtok = cur
 		
-		ex = self.expr()
+		ex = self.condition()
 		
 		# List of cases clauses which will be linked after the
 		#  parsing stage
@@ -601,7 +576,7 @@ class Parser(Lexer):
 			# Block of the clause
 			
 			bl = self.block()
-			c = ast.Case(op, val, bl, ln).origin(cur)
+			c = ast.Case(op, val, bl, ln).set_origin(cur)
 			if op == "else":
 				if de:
 					raise self.error(cur, "Duplicate else case")
@@ -629,7 +604,7 @@ class Parser(Lexer):
 		if de in cs:
 			cs.remove(de)
 		
-		return ast.Switch(ex, cs, de, th, el).origin(swtok)
+		return ast.Switch(ex, cs, de, th, el).set_origin(swtok)
 	
 	def then_else(self):
 		th = el = None
@@ -667,31 +642,25 @@ class Parser(Lexer):
 			parts.append(ast.Value(val[upto:]))
 		
 		if len(parts) == 1:
-			return parts[0].origin(cur)
+			return parts[0].set_origin(cur)
 		else:
-			return ast.Format(parts).origin(cur)
+			return ast.Format(parts).set_origin(cur)
 	
 	def parse_if(self, cur):
-		if self.maybe("("):
-			cond = self.expr()
-			self.expect(")")
-		else:
-			cond = self.expr()
+		cond = self.condition()
 		self.maybe("then")
 		
 		th = self.block()
-		el = None
-		if self.maybe("else"):
-			el = self.block()
+		el = self.maybe("else") and self.block()
 		
-		return ast.If(cond, th, el).origin(cur)
+		return ast.If(cond, th, el).set_origin(cur)
 	
 	def parse_import(self, cur):
-		return ast.Import(self.expr()).origin(cur)
+		return ast.Import(self.expr()).set_origin(cur)
 	
 	def parse_listliteral(self, cur):
 		if self.maybe("]"):
-			return ast.Value(EspList()).origin(cur)
+			return ast.Value(EspList()).set_origin(cur)
 		
 		vals = []
 		while True:
@@ -700,7 +669,7 @@ class Parser(Lexer):
 				break
 		self.expect("]")
 		
-		return ast.ListLiteral(vals).origin(cur)
+		return ast.ListLiteral(vals).set_origin(cur)
 	
 	def parse_unary(self, cur):
 		'''Prefix unary''' 
@@ -715,7 +684,7 @@ class Parser(Lexer):
 		else:
 			val = ast.Op(op, ast.Value(None), rhs)
 		
-		return val.origin(cur)
+		return val.set_origin(cur)
 	
 	def parse_loop(self, cur):
 		always = self.block()
@@ -725,14 +694,14 @@ class Parser(Lexer):
 			
 			return ast.Loop(ast.Block([
 				always, ast.If(cond, bl, semiAsExpr([th, ast.Branch("break")]))
-			]), el=el).origin(cur)
+			]), el=el).set_origin(cur)
 		else:
-			return ast.Loop(always).origin(cur)
+			return ast.Loop(always).set_origin(cur)
 	
 	def parse_for(self, cur):
 		self.expect("(")
 		qual = self.qualifier()
-		itvar = self.lvalue()
+		itvar = self.parse_declvar(qual)
 		self.expect("in")
 		toiter = self.expr()
 		self.expect(")")
@@ -741,9 +710,16 @@ class Parser(Lexer):
 		th, el = self.then_else()
 		
 		# TODO: n is a generalized lvalue, not a Var
-		return ast.ForLoop(itvar, toiter, body, th, el).origin(cur)
+		return ast.ForLoop(itvar, toiter, body, th, el).set_origin(cur)
 	
-	def parse_decl(self, cur):
+	def parse_declvar(self, mut):
+		name = self.expect(type="id")
+		v = ast.Var(name.value, mut).set_origin(name)
+		self.addVar(v)
+		
+		return v
+	
+	def parse_declgroup(self, cur):
 		'''
 		Var declarations are split into two separate concerns,
 		 variable name hoisting to the innermost enclosing
@@ -756,17 +732,14 @@ class Parser(Lexer):
 		
 		group = []
 		while True:
-			name = self.expect(type="id")
-			
-			v = ast.Var(name.value, mut).origin(cur)
-			self.addVar(v)
+			v = self.parse_declvar(mut)
 			
 			if self.maybe("="):
 				x = self.expr()
 				if x is None:
 					raise self.expected("expression")
 				
-				group.append(ast.Assign(v, x).origin(cur))
+				group.append(ast.Assign(v, x).set_origin(cur))
 			
 			if not self.maybe(","):
 				break
@@ -783,12 +756,12 @@ class Parser(Lexer):
 		
 		block = self.block()
 		
-		func = ast.Func(name, args, block).origin(cur)
+		func = ast.Func(name, args, block).set_origin(cur)
 		
 		if name:
 			v = ast.Var(str(name.value))
 			self.addVar(v)
-			return ast.Assign(v, func).origin(cur)
+			return ast.Assign(v, func).set_origin(cur)
 		else:
 			return func
 	
@@ -809,23 +782,23 @@ class Parser(Lexer):
 		self.consume()
 		
 		if ct == "val":
-			return ast.Value(cur.value).origin(cur)
+			return ast.Value(cur.value).set_origin(cur)
 		elif ct == "str":
 			return self.process_string(cur)
 		
 		elif ct == "id":
-			v = ast.Var(cur.value).origin(cur)
+			v = ast.Var(cur.value).set_origin(cur)
 			
 			# Check string call
 			s = self.maybe(type="str")
 			if s:
-				return ast.Call(v, [self.process_string(s)]).origin(s)
+				return ast.Call(v, [self.process_string(s)]).set_origin(s)
 			
 			return v
 		elif ct == "punc":
 			if val == "(":
 				if self.maybe(")"):
-					return ast.Tuple([]).origin(cur)
+					return ast.Tuple([]).set_origin(cur)
 				
 				x = self.semichain()
 				self.expect(")")
@@ -858,7 +831,7 @@ class Parser(Lexer):
 				# Not account for el
 				return ast.Loop(ast.Block([
 					ast.If(cond, bl, ast.Branch("break"))
-				]), el=el).origin(cur)
+				]), el=el).set_origin(cur)
 			
 			elif val == "for":
 				return self.parse_for(cur)
@@ -867,11 +840,11 @@ class Parser(Lexer):
 				return self.parse_switch(cur)
 			
 			elif val in {"break", "continue", "redo"}:
-				return ast.Branch(val).origin(cur)
+				return ast.Branch(val).set_origin(cur)
 				# Todo: targeted branches
 			
 			elif val in {"var", "const"}:
-				return semiAsExpr(self.parse_decl(cur))
+				return semiAsExpr(self.parse_declgroup(cur))
 			
 			elif val == "function":
 				return self.parse_funcliteral(cur)
@@ -892,7 +865,7 @@ class Parser(Lexer):
 			
 			if op and op.value in UNARY:
 				self.consume()
-				lhs = ast.Op([lhs, EspNone]).origin(op)
+				lhs = ast.Op([lhs, EspNone]).set_origin(op)
 			else:
 				break
 		
@@ -908,12 +881,11 @@ class Parser(Lexer):
 		cur = self.cur
 		if self.maybe("{"):
 			vars = []
-			self.scope.append(vars)
-			b = self.semichain()
-			self.scope.pop()
+			with common.stack(self.scope, vars):
+				b = self.semichain()
 			self.expect("}")
 			if len(vars) > 0:
-				return ast.Block(b, vars).origin(cur)
+				return ast.Block(b, vars).set_origin(cur)
 			else:
 				return semiAsExpr(b)
 		else:
@@ -922,6 +894,10 @@ class Parser(Lexer):
 			return x
 	
 	def accessexpr(self, lhs, min_prec):
+		'''
+		Accessor operators have special parsing requirements because they
+		 allow relaxed ids
+		'''
 		while self.cur:
 			cur = self.cur
 			op = cur.value
@@ -943,11 +919,11 @@ class Parser(Lexer):
 				raise self.expected("rhs")
 			
 			if op == ".":
-				lhs = ast.Index(lhs, [rhs]).origin(cur)
+				lhs = ast.Index(lhs, [rhs]).set_origin(cur)
 			elif op == "->":
-				lhs = ast.Bind(lhs, rhs).origin(cur)
+				lhs = ast.Bind(lhs, rhs).set_origin(cur)
 			elif op == "::":
-				lhs = ast.Descope(lhs, rhs).origin(cur)
+				lhs = ast.Descope(lhs, rhs).set_origin(cur)
 			else:
 				unreachable()
 		
@@ -967,12 +943,12 @@ class Parser(Lexer):
 			if self.maybe("("):
 				args = self.listing(",", self.expr)
 				self.expect(")")
-				lhs = ast.Call(lhs, args).origin(cur)
+				lhs = ast.Call(lhs, args).set_origin(cur)
 			
 			elif self.maybe("["):
 				args = self.listing(":", self.expr)
 				self.expect("]")
-				lhs = ast.Index(lhs, args).origin(cur)
+				lhs = ast.Index(lhs, args).set_origin(cur)
 			
 			# Accessor operators require special parsing because they allow
 			#  relaxed identifiers
@@ -993,7 +969,7 @@ class Parser(Lexer):
 				self.consume()
 				lhs = ast.After(
 					lhs, ast.Assign(lhs, ast.Value(1), "+")
-				).origin(cur)
+				).set_origin(cur)
 			
 			else:
 				op = cur.value
@@ -1018,7 +994,7 @@ class Parser(Lexer):
 					break
 				
 				if assign:
-					lhs = ast.Assign(lhs, rhs, op).origin(cur)
+					lhs = ast.Assign(lhs, rhs, op).set_origin(cur)
 				else:
 					if op == ",":
 						if type(lhs) is ast.Tuple:
@@ -1042,7 +1018,7 @@ class Parser(Lexer):
 		while self.cur is not None:
 			cur = self.cur
 			if self.maybe({"var", "const"}, type="kw"):
-				st += self.parse_decl(cur)
+				st += self.parse_declgroup(cur)
 			else:
 				x = self.expr()
 				if x is None:
@@ -1056,10 +1032,8 @@ class Parser(Lexer):
 	
 	def parse(self):
 		vars = []
-		self.scope.append(vars)
-		prog = ast.Prog(self.semichain(), vars)
-		self.scope.pop()
-		return prog
+		with common.stack(self.scope, vars):
+			return ast.Prog(self.semichain(), vars)
 
 # Debug stuff
 

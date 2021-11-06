@@ -675,10 +675,51 @@ In JS this is called "statement completion value". Statements which aren't valid
 
 Let's call the two types of statements completion and continuation
 
+AST Nodes have "charges" - taking terminology from physics, charges add degrees of freedom to model
+
+LValue charge
+RValue charge
+UValue charge
+Statement: Opaque | Transparent
+
+statement = has different semantics if in the top level of a block
+lvalue rvalue statement
+
+000 - invalid
+001 - statement only
+010 - 42
+011 - loops
+100 - {x = 1}
+101 - lvalue statement? invalid?
+110 - identifier
+111 - 
+
+LRU can be intermixed arbitrarily, there's probably some impossible states but they're mostly independent
+
+For statements, either it's an expression (LRU) or a statement, and statements have one additional charge of Opaque/Transparent
+
 Expression
-	Statement
-		Continuation (loop while for with)
-		Completion (if switch try )
+	LValue
+	RValue
+	UValue
+Statement
+	Transparent/Opaque
+	* Does the evaluation auto-return, or is it overwritten with none?
+	Maybe simple/complex?
+	In my brain I keep feeling this sensation that opaque statements are somehow "antisocial" and transparent statements are pro-social. Anti-social statements can be made social by putting them in an explicit expression
+
+Expression types are bottom-up recursive, the top level types are determined as a composition of the subexpression types.
+
+Statement types are top-down recursive, they depend on their placement in the top level of a block node (or equivalent position) and that status can be ruled out by subexpressions
+
+LValue - left hand value / assignable
+RValue - right hand value
+UValue - unpack value
+Statement
+	Opaque (loop while for with)
+	* opaque statements, when appearing at the top level of a block, are executed in full and evaluate to none
+	Transparent (if switch try )
+	* Transparent statements expose their final value
 
 So take this expression from the newest test script:
 

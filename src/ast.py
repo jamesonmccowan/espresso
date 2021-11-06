@@ -80,11 +80,12 @@ def is_expr(*x):
 	return all(isinstance(e, Expr) for e in x)
 
 class Expr:
+	lvalue = True
+	rvalue = True
+	statement = False
+	
 	def __init__(self):
-		self.lvalue = True
-		self.rvalue = True
-		
-		self.token = None
+		self.origin = None
 	
 	def __repr__(self):
 		raise NotImplementedError("__repr__")
@@ -94,9 +95,16 @@ class Expr:
 		visit_method = getattr(v, f"visit_{type(self).__name__.lower()}")
 		return visit_method(self)
 	
-	def origin(self, token):
-		self.token = token
+	def set_origin(self, token):
+		self.origin = token
 		return self
+	
+	def make_expr(self):
+		'''
+		Signals to this and all subexpressions that it's being used as an
+		 expression
+		'''
+		self.statement = False
 	
 	def sexp(self):
 		'''
@@ -111,7 +119,8 @@ class Statement(Expr):
 	Expressions which don't automatically return if they're the last in a
 	 function body.
 	'''
-	pass
+	
+	statement = True
 
 class Value(Expr):
 	'''Value'''
@@ -170,13 +179,16 @@ class Var(Expr):
 class Spread(Expr):
 	'''Spread operator, has its own node because it's syntax'''
 	
+	rvalue = False
+	
 	def __init__(self, var):
 		super().__init__()
 		assert(is_expr(var))
 		
 		self.var = var
 		self.lvalue = var.lvalue
-		self.rvalue = False
+		
+		var.make_expr()
 	
 	def __str__(self):
 		return "..." + sexp(self.var)
@@ -199,6 +211,8 @@ class Assign(Statement):
 		self.name = name
 		self.value = value
 		self.op = op
+		
+		value.make_expr()
 	
 	def __str__(self):
 		return sexp((f"assign{self.op or ''}=", self.name, self.value))
@@ -220,8 +234,15 @@ class Tuple(Expr):
 		assert(is_expr(*elems))
 		
 		self.elems = elems
-		self.lvalue = all(x.lvalue for x in elems)
-		self.rvalue = all(x.rvalue for x in elems)
+		
+		lv = rv = True
+		for e in elems:
+			lv = lv and e.lvalue
+			rv = rv and e.rvalue
+			e.make_expr()
+		
+		self.lvalue = lv
+		self.rvalue = rv
 	
 	def append(self, x):
 		self.elems.append(x)
@@ -245,6 +266,10 @@ class Call(Expr):
 		
 		self.func = func
 		self.args = args
+		
+		func.make_expr()
+		for a in args:
+			a.make_expr()
 	
 	def __str__(self):
 		return sexp(("call", self.func, *self.args))
@@ -265,6 +290,10 @@ class Index(Expr):
 		
 		self.obj = obj
 		self.indices = indices
+		
+		obj.make_expr()
+		for i in indices:
+			i.make_expr()
 	
 	def __str__(self):
 		return sexp((".", self.obj, [*self.indices]))
@@ -280,10 +309,12 @@ class After(Expr):
 		super().__init__()
 		assert(is_expr(value))
 		assert(is_expr(update))
-		if type(value) is If:
-			raise ValueError()
+		
 		self.value = value
 		self.update = update
+		
+		value.make_expr()
+		update.make_expr()
 	
 	def __str__(self):
 		return sexp(("after", self.value, self.update))
@@ -304,6 +335,9 @@ class Bind(Expr):
 		
 		self.obj = obj
 		self.member = member
+		
+		obj.make_expr()
+		member.make_expr()
 	
 	def __str__(self):
 		return sexp(self)
@@ -324,6 +358,9 @@ class Descope(Expr):
 		
 		self.obj = obj
 		self.member = member
+		
+		obj.make_expr()
+		member.make_expr()
 	
 	def __str__(self):
 		return sexp(self)
@@ -355,8 +392,11 @@ class Loop(Statement):
 		return ("loop", ...,
 			self.body, self.el and ("else", self.el))
 
-class If(Statement):
-	'''if statement'''
+class If(Expr):
+	'''
+	if statements always act the same as an expression or statement, so
+	 they're actually a kind of expression
+	'''
 	
 	def __init__(self, cond, th, el):
 		super().__init__()
@@ -367,6 +407,10 @@ class If(Statement):
 		self.cond = cond
 		self.th = th
 		self.el = el
+		
+		cond.make_expr()
+		
+		# Then and else retain their statement value
 	
 	def __str__(self):
 		return sexp(("if", self.cond,
@@ -415,6 +459,10 @@ class Op(Expr):
 		
 		self.args = args
 		self.lvalue = False # ops are always r-value
+		
+		# All subexpressions are not statements
+		for a in args:
+			a.make_expr()
 	
 	def __str__(self):
 		return sexp((self.op, *self.args))
@@ -489,6 +537,8 @@ class Return(Statement):
 		assert(is_expr(value))
 		
 		self.value = value
+		
+		value.make_expr()
 	
 	def __str__(self):
 		return sexp(("return", self.value))
@@ -507,6 +557,9 @@ class Format(Expr):
 		assert(is_expr(*parts))
 		
 		self.parts = parts
+		
+		for p in parts:
+			p.make_expr()
 	
 	def __str__(self):
 		return sexp(("format", ..., *(
@@ -532,6 +585,8 @@ class Case(Expr):
 		self.value = value
 		self.body = body
 		self.next = next
+		
+		value.make_expr()
 	
 	def __str__(self):
 		return sexp(("case", self.op, self.value,
@@ -567,6 +622,8 @@ class Switch(Expr):
 		self.de = de # DEfault
 		self.th = th # THen
 		self.el = el # ELse
+		
+		ex.make_expr()
 	
 	def __str__(self):
 		return sexp(("switch", self.ex,
@@ -595,6 +652,10 @@ class ObjectLiteral(Expr):
 		super().__init__()
 		#assert(??)
 		self.values = obj
+		
+		for k, v in obj:
+			k.make_expr()
+			v.make_expr()
 	
 	def __str__(self):
 		return sexp(("object", ...,
@@ -616,6 +677,9 @@ class ListLiteral(Expr):
 		super().__init__()
 		assert(is_expr(*vals))
 		self.values = vals
+		
+		for v in vals:
+			v.make_expr()
 	
 	def __str__(self):
 		return sexp(("list", *self.values))
@@ -644,6 +708,8 @@ class ForLoop(Statement):
 		self.body = body
 		self.th = th
 		self.el = el
+		
+		toiter.make_expr()
 	
 	def __str__(self):
 		return sexp(("for",
