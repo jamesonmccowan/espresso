@@ -775,6 +775,12 @@ struct ArenaHandle {
 	}
 };
 
+GCObject* GC::alloc_raw(size_t bytes) {
+	LOG_DEBUG("GC: Alloc %d bytes as raw", bytes);
+	GCObject* p = arenas.top()->alloc(bytes);
+	new (p) GCHeader(bytes, GCHeader::USERDATA);
+}
+
 struct SequenceArena {
 	
 };

@@ -1,34 +1,52 @@
 # Foreword
 "Tiny language packed with flavor" (feel a better one on the tip of my tongue)
 "Espress yourself"
+Waste not want not
 
 ## Design considerations
-General philosophy is to reuse everything as much as possible, get as much mileage out of every feature as possible. For instance, keywords double as special method names (eg return/throw/yield for shallow coroutines), operator overload methods use the literal operator name for both lhs and rhs operand positions, and some keywords even triple as builtin namespaces (eg async.sleep). Python list comprehensions are replaced with a spread operator applied to an expression-loop which produces an immediately instantiated generator.
+General philosophy is to reuse everything as much as possible, get as much mileage out of every feature as possible. For instance, keywords double as special method names (eg return/throw/yield for coroutines), operator overload methods use the literal operator name for both lhs and rhs operand positions, and some keywords even triple as builtin namespaces (eg async.sleep). Python list comprehensions are replaced with a spread operator applied to an expression-loop which produces an immediately instantiated generator.
 
-Take for instance the prototype declaration syntax which is inspired by JS classes: `proto Child is Parent {}` reuses two keywords where other languages usually introduce two new ones. This also adds a layer of synchronicity, where `Child is Parent` as well as instances of Child is a boolean operation returning true (working much like JS `instanceof`)
+Take for instance the prototype declaration syntax which is inspired by JS classes: `proto Child is Parent {}` reuses a keywords where other languages usually introduce two new ones. This also adds a layer of synchronicity, where `Child is Parent` as well as instances of Child is a boolean operation returning true (working much like JS `instanceof`)
 
-Espresso is a dynamic language, but it tries to follow the C++ zero-overhead principle as closely as is possible for a scripting language, a "minimal-overhead principle". Some features are inherent in the execution model, such as dynamic typing, but have ways to opt out (eg strict mode). Espresso has static-by-default lexical scoping which means variable names are unnecessary for lookup and only saved as debug metadata. Exceptions are C++-like, almost zero overhead for non-throwing code but very expensive for throwing code.
+Espresso is a dynamic language, but it tries to follow the C++ zero-overhead principle as closely as is possible for a scripting language, a "minimal-overhead principle". Some features are inherent in the execution model, such as dynamic typing, but have ways to opt out (eg type annotations). Espresso has static-by-default lexical scoping which means variable names are unnecessary for lookup and only saved as debug metadata. Exceptions are C++-like, almost zero overhead for non-throwing code but very expensive for throwing code.
 
 * Reuse everything as much as possible (keywords, features, syntax)
+* Be terse, but not unreadable
+* Don't repeat yourself
 * Small core, build up with libraries
 * Zero cost interfacing with native code
 * Embeddability
 * Generalization - especially when doing so simplifies logic
 * Small code size/memory usage
-* Ultimate goal of self-bootstrapping
+* Fast startup
+* Ultimate goal of self-bootstrapping JIT
 * Exceptions are exceptional, not alternate control flow
+  - Splits exceptions into failures and panics
 * Stateless tokenization
 * LR(1) syntax
+* The compiler is Espresso. If Espresso can do it, so can Espresso.
+  - "Minimize magic"
+
+----
+
+I would like espresso to be a delight to program in, the way Python tends to be and JS sometimes is. Python has strong opinions, but that appears to hold it back from implementing nice features for the sake of consistency (?). For example, the absolute mistake that is non-coercive string concatenation. str + int should just work, and it's surprising when you discover for the first time that it doesn't - and code was explicitly written to forbid it! Just, why? It seems almost like it was meant to emphasize a few of the early design considerations like duck typing vs dynamic typing that it crippled itself to make a point.
+
+On the other side of things is JS, which seems to have very few opinions at all. It just sort of tentatively supports everything, and while it can be pleasing to program in it because of just how open it is, it also doesn't guide one readily to "correct" programming, and it implements features no one needs and cause errors more than they do what people want. '0' == 0 is "nice", but it confuses the types while also introducing inconsistency because, for instance, "0" == 0, 0 == "00", but "0" != "00". Rather than unimplementing features, it implements too many unnecessary or counterproductive features.
+
+Then there's Lua, which is similarly unopinionated but for the opposite reason. It implements nothing at all, providing a core language and some bare bones functionality and requires everything else to be implemented in libraries by the end user. It would make more sense if a had a standard library or something, but it's just a collection of vaguely canonical libraries that everyone tends to use.
+
+So, a few lessons here. Do not write code to disable a feature unless that "feature" would only cause more confusion. Do not try to be clever and do more than what the programmer is asking. And for god's sake, make the language simple but fill the toolbox with tools!
+
+1. Code is for implementing features, not unimplementing them
 
 ### Design constraints
 Espresso is a multi-paradigm language implemented on top of a protype system
-* Language is ASCII, but UTF-8 friendly. A simple hack lets the lexer communicate character information with minimal logic and no state
+* Language is ASCII, but UTF-8 friendly. A simple hack lets the lexer communicate character information with minimal logic and no ment
 * Lexer is stateless and parser *never* backtracks
 * Prioritize ease of binding to host environment
 * Reuse syntax and features wherever possible
 * Prioritize reduced complexity - Lua should be an inspiration here
   - Core set of simple rules which yield arbitrary complexity
-  - Functions are monomorphic/single dispatch with optional type assertions
 * Exceptions are exceptional
 * Design with JIT in mind
   - JavaScript is a counter-inspiration here
@@ -38,227 +56,348 @@ Espresso is a multi-paradigm language implemented on top of a protype system
   - Monkey patching is possible but expensive and meant for debugging and hacking
 * Design for cache utilization
 * Only implement useful features
-  - eg JS string to number coercion isn't very useful and introduces tremendous complexity
-* Don't blindly reimplement features from older languages - eg raw 0-prefix octal
+  - eg JS string to number coercion isn't very useful
+* Don't blindly reimplement features from older languages - eg 0-prefix octal
+
+## Novel concepts
+* Module scope is compile time. The return of a module import can be serialized and rehydrated to allow faster start times
+  - Allows everything from config files to foreign languages to be implemented and run at compile time for import statements.
+  - Imagine a hypothetical C interface where you can write `import "project.h"` and bindings are generated as part of the static bytecode
+* Self-hosted JIT (have yet to see this, closest is PyPy but it's not really self-hosted because RPython transpiles to C)
+* `after` keyword to get rid of the common pattern `var tmp = a(); b(); return tmp`
+* Loops can be expressions, evaluating to invoked generators yielding the result of their body
+
+# Key terms
+* Expression: A set of related syntax elements
+* Composite expression: An expression which can be broken down into two or more valid subexpressions
+* Statement: Fully qualified expression which has no tokens after it which can extend it. Semicolons can guarantee the end of an expression
+* Value: A type of expression
+* Lvalue: left-value is a value which can legally appear on the left hand side of an assignment. Includes destructuring
+   - Plvalue: pure-lvalue, an lvalue which cannot be an rvalue, eg object literals containing defaults
+* Rvalue: right-hand-value, a value which can be evaluated
+  - Prvalue: pure-rvalue, an rvalue which cannot be an lvalue or a uvalue, eg primitive literals
 
 # Syntax
 
 ## Comments
-Comments use hashes "#" because this is generally scripty and compatible with hashbang. Multiline comments are also supported by following a similar pattern as C's comments `/* ... */`, replacing the "/" character with "#", so: `#* ... *#`. Like C, this won't nest. Finally, a nesting version of multiline comments is provided as `#{ ... }#`.
+Comments use hashes "#" for a few key reasons:
+* Generally more "scripty"
+* Compatible with hashbang
+* C-like "//" conflicts with the integer division operator
+
+Multiline comments use `#* ... *#` similar to C-likes but using hash and also won't nest. A nesting version of multiline comments is provided as `#{ ... }`.
 
 Technically using strings as comments is also supported ala Python, however these won't be respected as docstrings. These should be optimized out as dead code.
 
-## Operators
-The defined operators are those typical of a C-family language with some extra operators which have no assigned meaning for consistency. These are:
-* `+ - * / % ** // %%`
-  - `//` is the pythonic integer-divide operator
-* `== === != !== > >= < <= <>`
-  - `<>` is what other languages call the spaceship operator `<=>`, meaning ternary comparison
-* `<< <<< <<>` `>> >>> <>>`
-  - `<<>` and `<>>` are new operators meaning "rotate shift left" and "rotate shift right", respectively.
-* `! ~ & | ^ !! ~~ && || ^^`
-  - `!!` is the boolean operator
-* `in is as not has`
-  - `in` and `not` have pythonic semantics, including using `not` as a meta-operator, as with `is not`
-  - `is` is the type checking operator, equivalent to JS `instanceof`
-    * The `===` operator ("id equality") has python `is` semantics
-  - `as` is a coercion operator, primarily for use in strict code
-  - `has` is like `in`, but checks own properties by default
-    * Compare this to the JS idiom `if('x' in y) return y.x`. This feels jarring because the normal relationship, `y.x` is inverted with `'x' in y`. `has` keeps this ordering to be easier to read, as in `y has 'x'`
-* `= :=`
-  - `:=` is the emplacement operator with similar semantics to JS `Object.assign`
-* `++ --`
-  - C-like semantics
-  - Applied to r-values, simply increments/decrements without assignment eg `--1<<3` shifts 1 left by 3 then decrements, a common pattern for creating bit masks
-* `??`
-  - Null coalescing operator
-  - Boolean short-circuiting
-  - `x ?? y` = `if(x is none) y else x`
-* `..`
-  - Range operator, `x .. y` yields a range `[x, y)` useful for iteration
-  - As a unary operator, `..y` is a range `[0, y)`
-* `...`
-  - Spread operator
-  - Generally iterates over rhs and emplaces them in the particular construct
-  - eg `var x = [1, 2, 3]; [1, 2, ...x]` is `[1, 2, 1, 2, 3]`
-  - Indicates rest arguments eg `function test(a, b, ...rest)`
-  - Unpacks arbitrary elements eg `first, ...rest = list`
-* `=>`
-  - Lambda operator with JS-like semantics
-  - Strictly syntax, not overloadable
-  - Unpacks lhs and executes rhs with that context (as a lambda function)
-  - More permissive than JS because lhs can be any arbitrary l-value
-  - Also has semantics within switch expressions, where the rhs is evaluated with an implicit `break` to avoid having `break` after every `case`. C-like `:` after cases is also supported with the same semantics (fallthrough)
-* `->`
-  - Application operator
-  - Get or call rhs as if lhs was `this`
-  - Useful for generic functions, eg `x->join(', ')` to avoid reimplementing `join` on all iterables
-  - Allows one to access `private` variables, which are meant to be implementation details and not security-constrained
-* `::`
-  - Descoping operator
-  - Call or access rhs without applying lhs as `this`
-  - First parameter of a function is made into a `this` parameter
-  - Combined with `->`, this can apply arbitrary member functions to arbitrary objects, which is especially useful when implementing the global operator overload functions eg `x->x.proto::+(x, y)` meaning "get `+` from `x.proto`, then call it with `x` as `this`". This is necessary because `x.+(x, y)` has different semantics, calling `+` from the object itself rather than its prototype. For security purposes, operator overloading needs to be from the prototype, not the object.
-  - A special syntax is permitted for computed properties, `::[expr]`. `::(expr)` is also valid
-  - As a unary operator, `::func` adds a `this` parameter to the beginning of the parameter list *unless* a `this` parameter already exists.
-* `,`
-  - Comma is actually syntax, not an operator
-  - In an expression, it denotes a tuple (or list etc depending on context)
-  - Subexpressions may be omitted, ala `x, , y = z`. As unpacking, it means "ignore the missing value". As a tuple expression, it means "implied none". One exception is in tuple expressions with a trailing comma, which is ignored.
-* `;`
-  - Most languages consider this syntax
-  - This is reconceptualized as a non-overloadable "operator" which evaluates and discards lhs and returns rhs
-    * In the future this may be overloadable to express what happens when an expression is ignored by it, justifying statement vs expression forms of control flow as having the `;` operator overloaded to iterate the expression form and discard the results, equivalent to statement form
-  - Mostly equivalent to C's usage of the `,` operator
-  - No special restrictions on where this can appear, including within parentheses ala `(a; b; c)` which will evaluate `a` and `b`, then return `c`
-  - This has the lowest possible precedence
-* `[:]`
-  - Indexing has generalized Pythonic semantics, see [below](#index-ranges)
+## Primitive literals
+All primitive literals support immediate suffixes - that is, a valid identifier which follows the last valid character of the literal sequence with no whitespace. These are used for aesthetic and low-level literal handling ala C++ literal suffixes.
 
-To simplify logic, all overloadable binary operators double as unary prefix operators with the same precedence. Their overloads get `none` in as the lhs.
+### Numbers
+All numbers in espresso may contain `_` anywhere between two digits, not including a base prefix.
 
-### Defined but unused
-Some of the listed operators are defined for consistency with other operator patterns, but have no assigned use. This both simplifies parsing logic and provides users with extra operators to be overloaded. These are:
-* `%%` - continuation of `**` and `//`
-* `<<<` - continuation of `>>>` "logical right shift"
-* `~~` and `^^` - continuations of `~` and `^`
-* `~>` - continuation of `=>` and `->`
+#### Integers
+Integers can be binary, octal, or hexadecimal using the prefixes `0b`, `0o`, and `0x` respectively. Otherwise, they use decimal. Integers beginning with 0 have no special treatment and will use decimal.
 
-## Object syntax
-* Quoted: `{"x": 10}`
-* Unquoted: `{x: 10}`
-* Computed: `{[x]: 10}`
-* Packed: `{x, y, z}`
-* Integer keys: `{0: "zero"}`
-* Real keys: `{0.1: "point one"}`
-* Unquoted keywords are always strings: `{none: 10} == {"none": 10}`
-* Keys are still typed, though: `{[none]: 10} != {"none": 10}`
+#### Floats
+Decimal floating point numbers have the following syntax:
+`[int] "." [frac] ["e" {"-" | "+"} exp]`
+
+Hexadecimal floating point numbers have the following syntax:
+`"0x" [int] "." [frac] ["p" {"-" | "+"} exp]`
+
+Note that this is a slight simplification because it technically admits "." as a valid number. A proper pattern needs to make either int or frac optional, but not both simultaneously.
+
+### Strings
+Normal strings can be denoted by `'...'` or `"..."` and contain any characters, including newlines (though some normalization may apply). A `\\` character denotes an escape sequence from this table:
+
+| Sequence | Description           |
+| -------- | --------------------- |
+| \        | Backslash             |
+| '        | Single quote          |
+| "        | Double quote          |
+| `        | Backtick              |
+| n        | Newline               |
+| r        | Carriage return       |
+| t        | Tab                   |
+| e        | Escape character      |
+| 0-9      | 1-digit ASCII decimal |
+| oOOO     | 3-digit ASCII octal   |
+| xHH      | 2-digit ASCII hex     |
+| uHHHH    | 4-digit unicode hex   |
+| u{...}   | n-digit unicode hex   |
+| {...}    | String interpoloation |
+
+If a character other than one listed here follows a backslash, this is a syntax error.
+
+All normal strings support string interpolation by default. Compare this to Python format strings, which must use an `f` prefix and interpolation does not use backslashes to signal the start of a value.
+
+A "raw" string is denoted using backticks and may contain any characters, but all escape sequences except ``\\`` and ``\\` `` are disabled.
+
+Both normal and raw strings support Pythonic triple quoting which generally requires less escaping when the string contains the quote character. Triple quoted normal strings will also remove prefix literal newlines and dedent based on the first line.
+
+## Compound literals
+For simplicity, compound literals are parsed while keeping track of their validity as an uvalue or an rvalue. Uvalue compound literals can be the target of destructuring, while rvalue compound literals cannot.
+
+### Tuple
+A tuple is a sequence of values separated by commas, optionally surrounded by parentheses. Values between commas may be omitted which is interpreted as `none`. As a uvalue, tuples assign each element in sequence by iterating over the assigned value. As an rvalue, tuples are an immutable sequence.
+
+### List
+A list is a sequence of values separated by commas surrounded by square brackets. Like tuples, values may be omitted which is interpreted as `none`. As a uvalue, lists work exactly like tuples. As an rvalue, lists are mutable sequences.
+
+### Object
+An object is a key:value mapping deeply integrated with the language. As such its syntax is significantly more complex:
+
+* Key-value pair
+  - Quoted: `{"x": 10}`
+  - Unquoted: `{x: 10}` - includes operators
+    * Unquoted keywords and even builtin constants are treated as strings
+    * Keys are still typed, however: `{none: 10} != {[none]: 10}`
+  - Computed: `{[x]: 10}` evaluates `x` and uses that as the key
+  - Integer keys: `{0: "zero"}`
+  - Real keys: `{0.1: "point one"}` - this is valid but not recommended because floating point equality is poorly defined
+* Packed: `{x, y, z}` equivalent to `{x: x, y: y, z: z}`
+* Method: `{key(...args) { ... }}` - key can be any of the valid keys above
+  - The key can be prefixed by at most one of the accessor keywords `get`, `set`, `delete`
+
+Any object entry may be prefixed with at most one access modifier `public` (default), `protected`, or `private`
+Any object entry may be prefixed with at most one type qualifier `var` (default) or `const`
+
+Key-value pairs may be omitted (resulting in two or more sequential commas) which has no effect.
+
+An extended syntax is provided which makes a puvalue: A key-value entry may be followed by `= value` which provides a default value if `unpacked has value` is false.
+
+An object literal uvalue may contain packed lvalues or key-value pairs in which the key is an lvalue and the value is a uvalue. If any other syntax is included, it is an prvalue.
 
 Duplicate key names are illegal. If a computed property results in an existing key, the computed property replaces the constant property. Comparison uses ==, so 0 != '0' and you can have both string and number.
 
-### Methods
-```js
-{
-	async yield async_generator() {},
-	async async_method() {},
-	yield generator() {},
-	method() {},
-	get getter() {},
-	set setter() {},
-	new() { #* constructor *# },
-	call() { #* call operator *# },
-	get() { #* getter trap *# },
-	set() { #* setter trap *# },
-	delete() { #* delete trap *# },
-	is() { #* is trap *# },
-	in() { #* in overload *# },
-	
-	get [x]() { #* methods can be computed too *# },
-	
-	with() {
-		# Implementing pythonic context manager
-		this.__enter__();
-		try {
-			return yield;
-		}
-		after {
-			this.__exit__();
-		}
-		
-		this.__enter__();
-		try return yield;
-		after this.__exit__();
+## Operators
+### Arithmetic
+* `+` addition or concatenation
+* `-` subtraction
+* `*` multiplication
+* `/` division
+* `%` modulus
+* `**` power
+* `//` integer division
+* `%%` (unused)
+
+### Assignment
+Arithmetic operators can all be suffixed by `=` to perform them inplace. 
+As well as inplace operators for all of these except `++` and `--` by appending `=`
+
+* `=` assignment, as an rvalue it evaluates to the rhs
+* `:=` emplacement operator, similar to JS's `Object.assign`
+
+### Boolean
+* `>` `>=` `<` `<=` `==` `!=` ordinary comparisons
+* `===` `!==` identity equality
+* `<=>` three-way comparison
+* `and` or `&&` short circuiting boolean and
+* `or` or `||` short circuiting boolean or
+* `not` or `!` booleal not
+* `!!` boolean coercion
+* `??` short circuiting nullish coalescing operator
+
+These comparison operators can be chained ala Python.
+
+### Bitwise
+* `~` bitwise not (binary form unused)
+* `&` bitwise and
+* `|` bitwise or
+* `^` bitwise xor
+* `<<` arithmetic left shift
+* `>>` arithmetic right shift
+* `>>>` logical right shift
+* `<<>` rotate left
+* `<>>` rotate right
+
+### Keyword
+* `in` boolean predicate returning whether a value is in a container
+* `has` boolean predicate returning whether an object has an own property
+* `is` boolean predicate of identity equality, prototype inheritance, or predicate satisfaction
+* `as` coercion operator
+* `after` shuffle evaluation, that is: `x() after y() === (var t = x(); y(); t)`
+
+### Other
+* `x.y` attribute
+  - `x.(y)` evaluates y and uses that as the attribute name
+  - `x.[y]` evaluates `[y]` and uses that
+  - `x.{...}` evaluates the object and uses that
+* `x[y]` index
+  - `x[a:...:z]` slice indexing
+* `x(y)` function call
+* `@x D` or `@x(y) D` decorator (N is any dvalue)
+* `..` range operator (prefix form is valid)
+* `...` spread operator
+  - Depending on the context, `...` can also be interpreted as a special value ala Python
+* `;` procedural evaluation
+* `->` generic application operator, uses lhs as `this` to call the rhs generic function
+  - This allows for accessing private properties when one has the symbol, using `x->.(symbol)`
+* `=>` lambda "operator", syntax for arrow functions and case expressions
+* `::` binding operator, returns a function with parameters rebound
+  - `::` as a unary operator adds `this` as the first parameter along with any parameter bindings
+* `<:` and `:>` injection operator, `x <: y === x(y)` and `x :> y === y(x)`
+* `++` `--` inc/decrement (unary prefix or suffix)
+  - Applied to rvalues, effectively equivalent to `x + 1` and `x - 1`
+
+### Unused/experimental
+These are operators which may emerge from simplified regexes or look aesthetically nice without having any clear usage.
+
+Define but not used:
+* `^^` `<<<` `%%` `~~`
+
+Aesthetically interesting:
+* `~>` `->>` `=>>` `~>>` `<>`
+* `?:` `??:` `@>` `+>` `><` `+/-` `-/+` `/*` `*/` `<:>`
+
+To simplify logic, all overloadable binary operators double as unary prefix operators with the same precedence. Their overloads get `none` in as the lhs.
+
+### Precedence
+* (looser binding)
+* Statement: `;`
+* Separation: `,` `:`
+* Keyword: `return` `yield`
+* Arrow: `=>`
+* Assignment: `=` and all compound assignment operators
+* Nullish: `??` `?!`
+* Boolean or: `||` `or`
+* Boolean xor: `^^`
+* Boolean and: `&&` `and`
+* Equality: `==` `!=` `===` `!==`
+* Relational: `<` `<=` `>` `>=` `<=>` `in` `is` `has` `as`
+* Injection: `<:` `:>`
+* Bitwise or: `|`
+* Bitwise xor: `^`
+* Bitwise and: `&`
+* Bitshift: `<<` `>>` `<<<` `>>>` `<<>` `<>>`
+* Additive: `+` `-`
+* Multiplicative: `*` `/` `%` `//` `%%`
+* Exponential: `**`
+* Prefix unary: `!` `not` `~` `+` `-` `++` `--` `typeof` `delete` `await`
+* Postfix unary: `++` `--`
+* `new`
+* Call and index: `f(...)` `f[...]`
+* Application: `->`
+* Access: `.` `::`
+* Grouping: `(...)`
+* (tighter binding)
+
+### Special precedence
+* `after` is just above `;` to the left, tighter binding to the right (and it can accept a block instead)
+
+## Variables
+`("var" | "const") uvalue [":" expr] ["=" expr]`
+
+Variables are declared using a type qualifier and a comma-separated list of uvalues each with an optional type annotation and optional assignment. All declarations are hoisted to block scope. Variables can be used as an rvalue, in which case they evaluate to the last value.
+
+Variable declarations are dvalue expressions, meaning they can also be decorated.
+
+## Control flow
+
+### If then else
+`if cond ["then"] expr ["else" expr]`
+
+Conditionally execute one block or another. As an rvalue, it evaluates to the block which executes (or `none` if the `else` block should execute but doesn't exist).
+
+### Loops
+Loops in a statement position execute as normal. Loops in an expression position evaluate to an invoked generator. All loops support two additional structures, `then` and `else`, which appear in that order. If a loop iteration evaluates to the global signal `delete`, the result is not included in the sequence.
+
+All loops may optionally be followed by a `then` block and/or an `else` block. A `then` block executes when the loop exits normally (and the condition is false) whereas the else block executes when the loop is exited prematurely, with no guarantee that the condition is false. Note that the `then` block fills the place of Python's loop else block while the `else` block is a new construct representing an unusual exit from the loop with break.
+
+#### Loop while
+`["loop" always] ["while" cond body] ["then" then] ["else" else]`
+
+This is equivalent to the following C:
+
+```c
+_continue:
+	/* always */
+	if(cond) {
+		/* body */
+		goto _continue;
+	_break:
+		/* else */
 	}
-	
-	+(lhs, rhs) {
-		#* + operator overload *#
-		#* unary + sets lhs = none and rhs = this *#
-	},
-	
-	\<>(lhs, rhs) { #* Overload for comparison ops *# },
-	>(lhs, rhs) { #* Overrides the default provided by <=> *# },
-	===() { #* ERROR, can't overload id equality *# },
-	
-	++() { #* ERROR, can't overload count ops *# },
-	&&() { #* ERROR, can't overload boolean ops *# },
-	->() { #* ERROR, can't overload binding ops *# },
-	bool() { #* Truthiness value *# },
-	string() { #* String value *# },
-	
-	public x: 0, # Public properties define publicly accessible slots
-	private x: 0, # Private properties can only be accessed by this.*
-		# Note: Fully private properties existing within the object are
-		#  definitionally impossible in a prototypical language which
-		#  can always extend the existing object with a new method to
-		#  return the private property. The only way to get full
-		#  privacy is to use closures and symbols.
-	static x: 0, # Set on the prototype
-	
-	public: [] #* Implicit property listing all public names. Functionally
-		it's meant to preallocate slots, sort of like Python's __slots__ *#
-	private: [] #* Implicit property listing all private names. Also
-		allocates slots, but they're private *#
-	static: [] #* Implicit property listing, acts as a filter *#
-}
+	else {
+		/* then */
+	}
 ```
 
-Operator overload resolution begins on an object's prototype, not the own properties. Eg `!!{bool() { false }} == true` but
-`!!new {bool() { false }} == false`. The process goes as follows:
+This two-block extended form is referenced in Wikipedia as "loop with test in the middle" as proposed by Ole-Johan Dahl in 1972. If a loop isn't followed by a while expression, it represents an infinite loop.
 
+This feature was added because it's a much more common programming pattern than one would think. Executing code, checking for loop exit, and upkeep.
+
+#### For in
+`["for" "(" [name "in"] iter ")" body ["then" then] ["else" else]`
+
+Iterates over `iter`, putting the result in `name` and executing `body`. Note that `name "in"` is optional, and integers in espresso are iterable (resulting in a range from 0 to the integer, exclusive). Thus, `for` can be used like some languages use `repeat` to repeat a block a certain number of times:
+
+`for(10) fn()` will execute `fn()` 10 times.
+
+C-like `for` loops can be approximated by including a variable, eg:
+
+`for(var i in 10) fn(i)` similar to `for(int i = 0; i < 10; ++i) fn(i)`
+
+### Try else
+`"try" body "then" then "else" else`
+
+Execute `body`. If it completes without failure, execute `then`. Otherwise, execute `else`. This is based on an opinionated language design that exceptions are exceptional, so the caught error isn't immediately exposed; it can be recovered using `fail.error`. The whole expression as an rvalue is the result of the last block which executed. The syntax was optimized for idiomatic usage, eg:
+
+`try mayFail() else fallback()` that is, evaluate `mayFail()`. If it's successful, use its value, otherwise use the result of `fallback()`.
+
+### Switch case
+```ebnf
+op = {"is" "not"} | {"not" "in"} | cmp
+"switch" expr "{" {
+	"case" [[op] value] [":" | "=>"] body
+} "}" ["then" then] ["else" else]
 ```
-lhs op rhs =
-	try lhs->lhs.proto.op(lhs, rhs)
-	else rhs->rhs.proto.op(lhs, rhs)
-```
 
-Comparison operators also support arbitrary chaining ala Python:
+Determine the first match for an expression. Evaluates to the last executed body. It uses an extended form of C-like switch-case statements. Normal cases with `:` execute as a block which falls through at the end. Cases with `=>` automatically `break` at the end of their execution. Both can surround their contents with curly braces. The default case is an empty case statement, avoiding the introduction of an extraneous keyword.
 
-`x < y < z` = `x < y and y < z`
+The `then` block executes when execution reaches the end of a `=>` block or falls off the end of the switch expression. The `else` block executes when a break is executed. If `then` or `else` is executed, they are its result value.
 
-### Unpacking
-Unpacking is a special assignment operation which assigns multiple values from a single enumerable. The semantics of this are shared with JS, Python, and C++ (among other languages) with some variations.
+The switch expression also acts as a pattern matching syntax. If there is no op and value is a non-identifier lvalue, the pattern is checked and destructured if it matches. Destructuring and prototype-checking can be combined using the syntax `{destructure} is MyProto`. Prototypes may override the `case` operator to change their behavior in a switch expression. In the rare edge case one wants to match a value literally and not with its `case` semantics (eg range), they can surround the expression with parentheses. There is no syntax like Python's `case _:` which allows one to capture the value as a wildcard pattern.
 
-There are two types of unpacking:
-* `x, y, z = it` or `(x, y, z) = it` or `[x, y, z] = it`
-  - Sequential unpacking
-  - At most one element of sequential unpacking can use the rest operator `...`
-    * This can appear anywhere and will get the leftover corresponding elements after non-rest elements are unpacked
+### Statements
+`"break" [label | int | kw]` breaks from the specified statement, defaulting to the innermost.
+`"continue" [label | int | kw]` continues from the statement.
+`"goto" label` goto a label which must be in an enclosing block. Goto statements cannot enter a block.
+
+`break` and `continue` can optionally take a label (targeting the statement that follows it), a literal integer (relative inside-out 0-indexed block), or one of the statement keywords (`if`, `loop`, `while`, `for`, `switch`) optionally with another literal integer which only targets that kind of block. Eg, `break for 2` will break the 3rd for loop. Note that `continue` cannot target `if` or `switch`.
+
+`goto` is specially restricted such that it cannot accept backreferences, labels are block-scoped (thus, it cannot jump into a block), and it cannot jump out of a function.
 
 ## Functions
-Functions can be statements or expressions. Statements define the function
-(const in closed namespaces, var in open namespaces) hoisted to the containing block. Statements may not have computed names. Expressions do not define the function, but *can* have computed names, which are functionally only useful for debugging.
+`param = ["var" | "const"] uvalue [":" expr] ["=" expr]`
 
-Function bodies have no special requirements, they follow the same rules as any other control flow operators. A return is unnecessary as the last value will be returned by default.
+### Normal
+`["var" | "const"] ["async"] "function" ["..."] [name] "(" [param {"," param}] ")" expr`
 
-Function parameters support destructures, default values, and rest parameters. Optionally, `this` may be included among the parameters which will bind that parameter to `this` when the function is not called as a method. For instance,
+Normal functions can be statements or expressions. Statements define the function (const in closed namespaces, var in open namespaces) hoisted to the containing block. Statements may not have computed names. Expressions do not define the function, but *can* have computed names, which are functionally only useful for debugging.
+
+Function bodies can begin and end with curly braces `{ ... }`, or they can be normal expressions. The last value will be returned by default, with some restrictions. Statements, assignments, and variable declarations will not be returned by default.
+
+Function parameters support destructuring, default values, and rest parameters. Optionally, `this` may be included among the parameters which will bind that parameter to `this` when the function is not called as a method. This is especially useful for generic methods. For instance,
 
 ```js
 function test1(this, x, y) {
-	return (x + y)*this.z;
+	return (x + y)*this;
 }
 function test2(x, y, this) {
-	return (x + y)*this.z;
+	return (x + y)*this;
 }
 
-test1({z: 10}, 2, 3) == 50;
-test2(2, 3, {z: 10}) == 50;
-
-{z: 10}->test1(2, 3) == 50;
-{z: 10}->test2(2, 3) == 50;
+test1(10, 2, 3) == test2(2, 3, 10)
+ == 10->test1(2, 3) == 10->test2(2, 3) == 50
 ```
 
-Optionally a declarator may be used to specify the mutability of a function. Functions are const by default.
+Optionally a declarator may be used to specify the mutability of a function in its scope. Functions are const by default.
 
-```js
-var function onload() {} # equivalent to
-var onload = function onload() {}
-```
+### Arrow
+Arrow functions lexically bind `this` (unless it has `this` among its parameters) and have roughly the same syntax as JS. The parser treats it as a sort of destructuring expression to simplify the logic, resulting in a less restrictive grammar than JS arrow functions. An identifier followed by an arrow is immediately evaluated as an arrow function, so the syntax `x, y, z => z` evaluates to a tuple with the last element being the identity function whereas `(x, y, z) => z` evaluates to a tuple destructure arrow function (aka a normal function).
 
-Arrow functions lexically bind `this` (unless it has `this` among its parameters) and has roughly the same syntax as JS. The parser treats it as a sort of destructuring expression to simplify the logic, resulting in a less restrictive grammar than JS arrow functions. An identifier followed by an arrow is immediately evaluated as an arrow function, so the syntax `x, y, z => z` evaluates to a tuple with the last element being the identity function whereas `(x, y, z) => z` evaluates to a tuple destructure arrow function.
-
-Arrow functions can't be generators, in part because the syntax to express that is unclear and because this only makes sense for a blocked expression.
-
-### Dot expressions
+### Dot
 An additional syntax is supported for an even more terse arrow function expression. If a dot "." is encountered in a value position, this begins a dot function expression. This can be continued in two ways:
 1. The next token is an identifier, and subsequent operations operate on
    the property of the first parameter of the arrow function.
@@ -274,69 +413,71 @@ An additional syntax is supported for an even more terse arrow function expressi
 .[prop] + 1 #* = *# x => x[prop] + 1
 ```
 
-Note that this syntax in most other languages would always produce parsing errors, so it's always unambiguous. Also note that this requires the operand to be the leftmost in the expression - eg there is no dot function for
-`x => "prefix " + x`. This isn't really a problem because this is just a nice syntax sugar for common use-cases in functional composition.
+Note that this syntax in most other languages would always produce parsing errors, so it's always unambiguous. Also note that this requires the operand to be the leftmost in the expression - eg there is no dot function for `x => "prefix " + x`. This isn't really a problem because functions support higher order functional composition, so eg adding two functions together will produce a third function which evaluates the two subfunctions and add their results together.
+
+Thus, `1/.length` is parsed as `1 / (.length)` and produces an equivalent arrow function `...args => 1(...args) / (x => x.length)(...args)`. Numbers used as functions evaluate to themselves, resulting in the final arrow function `x => 1/x.length`
 
 ### Prefix calling
-When an identifier is followed by string, number, or object, it's invoked as a unary function with that value. This allows us to simulate idioms found in other languages, like templates in JS: `html f"<i>safe {v}</i>"`. Other literal types are excluded from this shortcut to prevent ambiguity
+When an identifier is followed by string, number, or object literal, it's invoked as a unary function with that value. This allows us to simulate idioms found in other languages, like templates in JS: `html"<i>safe \{v}</i>"`. If the object contained by the identifier overrides the `template` (?) operator, it is passed a list of interpolation strings followed by the values between those strings (ie `(tpl, ...values) => alternate(tpl, values)->join('')` as the default behavior) ala the JS template literal syntax.
 
-### Index ranges
-Pythonic ranges are supported with a more generalized syntax. Getters receive parameters separated by colons, and like Python each element can contain commas to represent tuples. No inherent meaning is assigned to this syntax, but it *is* overloaded by several builtins like lists. For example:
+### Trailing call
+`x { ...object }`
+`x(1, 2, 3) { ...object }`
+`x(x, y) => { body }`
 
-```js
-var x = [1, 2, 3];
-new {
-	get(...args) {
-		assert
-			args[0] == 1 and
-			args[1] == 2 and
-			args[2] == 3 and
-			args[3] == 4 and
-			args[4] == (5, 6, 7) and
-			args[5] == 8 and
-			
-			# Spread operator works as if inserting the contents separated
-			#  by colons
-			args[6] == 1 and
-			args[7] == 2 and
-			args[8] == 3;
-	}
-}[1:2:3:4:5,6,7:8:...x]
-```
+## Proto
+Espresso is fundamentally a protype-based language. The core object model built into the language itself is delegated prototype chains. Objects have "own properties", which are properties on the object themselves, and "inherited properties", which are non-own properties that are an own property of an object in the prototype chain.
 
-As a logical consequence, `arr[]` calls the getter with no arguments.
+That being said, while prototypes themselves are not treated specially (any object can be a prototype without exception) syntax sugar is provided to define a prototype the way one might define a class in an OOP language.
 
-An alternate syntax with equivalent semantics is:
-```js
-x.(1, 2, 3) == x[1:2:3]
-```
+`"proto" [name] ["is" parent] "{" ??? "}"`
 
-### Tail-call recursion
-PTC is tentatively supported because it feels bad to keep extra stack frames around when they're effectively only good for stack traces, which are exceptional. To prevent confusion, the calling convention distinguishes tail calls with some kind of flag so the elided frames can be replaced with something like "..."
+This defines an object named `name` with `parent` as the prototype (or `none`) and with the properties defined in the following block, which has a custom syntax not found anywhere else in the language. The block is a series of entries similar to object literals which have more options for type qualification and other syntax sugar. Instead of commas, they're separated by end-of-statement and semicolons.
 
-## Everything is an expression
-Without exception, everything is allowable as an expression. Some expressions have different semantics when they appear as statements, for instance loops as statements behave like normal, but as expressions they are syntax sugar for an immediately invoked generator. Here we compare Pythonic list evaluation to loop expressions:
+### Member fields
+Member fields are properties which are expected to appear in prototype instantiations. There are two ways to declare them:
 
-```python
-["0x" + str(x) for x in range(10)] = [...for(var x in range(10)) "0x" + x]
+* `public` declares a public property
+* `protected` declares a protected property, which is non-enumerable but can be accessed on any object so long as you have the key
+* `private` declares a private property, which is also non-enumerable but has the additional restriction that it must be accessed using `this` or the generic function applicator `->`. By default, it additionally creates a symbol accessed in the prototype's scope as the private member's name (eg `private x` is accessed via `this.(x)` or `this[x]`).
 
-#* => *#
-function yield() {
-	for (var x in range(10)) {
-		yield "0x" + x;
-	}
-}
-```
+### Static fields
+Static fields are syntax sugar which is passed to the global proto operator to be a property on the prototype object itself but not on its instances. These are defined by:
 
-Note the preceeding ellipses, which are *not* a specialized syntax for this.
-Rather, it represents a spread operator being applied to an iterable.
+`("static" ["var" | "const"] | ["var" | "const"]) decl`
 
-One consequence of this principle is that the semicolon works like how many C-like languages treat the comma operator; it evaluates the operands in order and returns the last element. For instance, `(1;2;3) == 3`. Control flow keywords execute as expected when they are evaluated, which may lead to some very nice idiomatic code: `x and return x` will only return x if it's truthy, or `isValid(x) or fail` which is comparable to the PHP idiom "x or die()".
+### Methods
+Methods are declared as either member or static, and use the same syntax as object methods.
+
+### Prototyping
+A prototype which overrides the `proto` operator can control how their children are prototyped. The operator is passed the prototype's name and a list of fields in order of declaration. `this` is the prototype, and the return value is the result of the prototyping. This mechanism is extremely powerful, as it allows prototypes to effectively work like any number of metatyping constructs found in other languages, which Espresso treats as first class values. Prototypes which override the `proto` operator are called "metatypes". Usually these will override more operators to implement type algebras.
+
+#### Class
+`class` is a metatype which composes a "class" type and behaves more or less like one would expect in an OOP language. To allow for operator overriding instances, `class` maintains two separate prototype chains with mutually references `instance` and `class`.
+
+#### Struct
+`struct` is a metatype which acts like a combination of Pythons' `dataclass`, `cffi`, and `struct.(un)pack`. All fields are typed and define the data layout.
+
+#### Enum
+`enum` is a metatype which allows one to enumerate a fixed set of values all sharing the same type.
+
+#### Union
+`union` is mostly used for type checking of values which can be one of a number of types.
+
+#### Interface
+`interface` is mostly used for validation of code correctness. It ensures objects which inherit from it have all the necessary methods for an interface, and it applies even to objects that don't inherit from it, provided they still satisfy its interface.
 
 ## Namespaces
-Two types of top-level namespaces are recognized: closed and open. Modules almost always have a closed namespace, which means the set of valid identifiers is known at parse time and no new ones can be added. An open namespace is used primarily for REPL interfaces. In these namespaces, identifiers can be added and even removed as needed (using delete, which normally won't work). Other features which are normally forbidden (global object, global := import "module", etc) are enabled.
+Three types of namespaces are recognized: closed, module, and open.
 
-### Modules
+### Closed
+In a closed or static namespace, every variable is bound and accounted for and variable lookup is equivalent to indexing an array. Espresso by default will try to make any namespace it can closed because it lessens the level of indirection.
+
+### Module
+Module namespaces are used to solve intermodule coupling issues when star imports are involved. If there are no star imports, every variable is either bound or a syntax error (because it has no valid binding). If there is a star import, the local scope of the module depends on the scope of the imported module which cannot be determined until runtime without introducing unacceptable coupling between object files. Bound variables can still be looked up the same as in closed namespaces, but unbound variables (which may come from the star import) require a level of indirection, comparable to dynamic linking.
+
+The equivalent is an array of pointers to variable slots. The array represents the set of unbound variables (with each index corresponding to a different unbound variable). A possible optimization in the JIT stage is to bake in these references into code rather than looking them up, since they're set once and never touched again.
+
 The object returned by import is built from exported objects, not the top level namespace, so modifying the module object won't modify its namespace. Modules are syntax sugar for a nullary function call.
 
 ```js
@@ -349,213 +490,59 @@ is roughly equivalent to
 
 ```js
 function import() {
-	const exports = {...};
-	exports.myFunc = function myFunc() { ... }
-	
-	exports.proto = body();
+	const module = {a: 3};
+	const exports = new module {
+		myFunc() { ... }
+	}
 	return exports;
 }
 ```
 
 The return of a module (inspired from Lua) is set as the prototype of the module object, with exports being own properties. If a return isn't specified, `none` is assumed.
 
-## Control flow
-### Loops
-Loops in a statement position execute as normal. Loops in an expression position evaluate to an invoked generator. All loops support two additional structures, `then` and `else`, which appear in that order.
-
-```js
-while(cond) {
-	# body
-}
-then {
-	# then
-}
-else {
-	# else
-}
-```
-
-which is equivalent to the following:
-
-```c++
-_continue:
-	if(cond) {
-	_redo:
-		// body
-		goto _continue;
-	_break:
-		// else
-	}
-	else {
-		// then
-	}
-```
-
-The then block executes when the loop exits normally (and the condition is false) whereas the else block executes when the loop is exited prematurely, with no guarantee that the condition is false. Note that the "then" block fills the place of Python's loop else block while the "else" block is a new construct representing an unusual exit from the loop with break.
-
-What is normally called "do-while" is replaced with "loop-while" extended with an additional (optional) block. This is referenced in Wikipedia as "loop with test in the middle" as proposed by Ole-Johan Dahl in 1972:
-
-```
-loop {
-	# always
-} while(cond) {
-	# body
-}
-then {
-	# then
-}
-else {
-	# else
-}
-```
-
-This is a generalized form of the typical do-while construction, which enables the first block to always be executed at least once, with the rest conditionally executed repeatedly. This would translate to:
-
-```c++
-_continue:
-	// always
-	if(cond) {
-	_redo:
-		// body
-		goto _continue;
-	_break:
-		// else
-	}
-	else {
-		// then
-	}
-```
-
-Note that this is the same as the while code above, just with the "always" block inserted immediately after `_continue`. If a loop isn't followed by a while expression, it represents an infinite loop. Note that unlike other loops, there *is not* a then or else block because the only way to exit such a loop is a break.
-
-#### Do block
-A do block takes the place of the JS idiom IIFE (immediately invoked function expression). It enables a complex algorithm with scoping to be used in place of an expression. A do block acts as if its body is a function called with no arguments. `this` is lexically bound.
-
-### Exception handling
-Exceptions are considered *exceptional* and represent a state which wasn't expected to occur. Ordinarily errors aren't caught as much as they are accounted for. The thrown object can be recovered using `fail.error` and the stack is in `fail.stack`. The full try statement expression is:
-
-```
-try {
-	# Code which may throw an error
-}
-then {
-	# Try block completed with no error
-}
-else {
-	# Try block interrupted by an error (equivalent of catch)
-}
-after {
-	# Always executed
-}
-```
+### Open
+Open or dynamic namespaces do not have a limit to the number or names of the variables they contain. These are primarily useful for REPLs, where names can be introduced where none existed before. As such, they must be accessed via a dictionary lookup. This mode of namespace can also be combined with a closed namespace by dynamically growing the variable register array. This is useful for functions added to the open namespace which already have all their variables bound.
 
 ### Namespace
-The `namespace` keyword returns an open namespace initialized using the provided block. As a statement, it's declared as a const variable using its mandatory name. As an expression, the name is optional (for debug).
+The `namespace` keyword returns an open namespace prototyped by an optional object and initialized using the provided block. As a statement, it's declared as a const variable using its mandatory name. As an expression, the name is optional (for debug).
 
 Dynamic namespaces are created by enclosing the object in parentheses, like:
 ```js
 namespace name(obj) {}
 ```
 
-This has the same semantics as JS ```with``` and exists solely as a way to replicate REPL dynamic namespaces, since lexical scoping is otherwise static.
+This has the same semantics as JS ```with``` and exists solely as a way to replicate REPL dynamic namespaces, since lexical scoping is otherwise static. If `obj` is not provided, eg `namespace name { ... }`, it's a closed namespace equivalent to importing the enclosed code as a module.
+
+# Standard library
+An aim of espresso is to yield arbitrary complexity from a small set of self-consistent rules. The standard library builds on top of the base language and implements features to be used in all espresso programs. This includes operator overload protocols, second order object models, and the methods of built-in types among others.
 
 ## Protocols
 This section describes the various language protocols
 
-### Iterator
-Has a method named "next" which returns {value, done} where "value" is the next value and "done" is a boolean indicating whether or not this is the last value of the iterator. Calls after the first {done: true} have undefined behavior, but ideally it would just return {done: true} indefinitely.
-
 ### Iterable
 Has a method named "iter" which returns an iterator. Almost always an iterator should implement iterable as well, returning itself.
 
+### Iterator
+Considered a special case of functions which, when invoked, can return different values. If the returned value is the sentinel value StopIteration, iteration will end. Subsequent calls should be StopIteration as well.
+
 ### Generator
-Generators are a single type for computed iterators and coroutines meant for suspending and resuming execution within the function body. They implement three methods: `yield`, `throw`, and `return`. `yield` continues execution and returns the next yielded value - if it's given arguments, these are what the yield expression evaluates to within the generator - one argument is as-is, multiple is a tuple. `throw` throws an error into the generator from the point where execution would resume. `return` stops the generator.
+Generators are a single type for computed iterators and stackless coroutines meant for suspending and resuming execution within the function body. They implement three methods: `yield`, `throw`, and `return`. `yield` continues execution and returns the next yielded value - it can accept one argument, which is what the yield expression evaluates to within the generator. `throw` throws an error into the generator from the point where execution would resume. `return` stops the generator.
 
 ### With
-To help with the lack of RAII, the with expression from Python is incorporated. The protocol used is like Python's context manager - a `with` method is implemented as a coroutine. `with` is first called when the with block is entered, then the coroutine is resumed with the value/error which exits the block, and finally .return() is called. Technically this means a coroutine isn't necessary, just a function which returns a function implementing the coroutine interface.
+To help with the lack of RAII, the `with` statement from Python is incorporated. The protocol used is like Python's context manager - a `with` method is implemented as a stackless coroutine. `with` is first called when the with block is entered, then the coroutine is resumed with the value/error which exits the block, and finally .return() is called. Technically this means a coroutine isn't necessary, just a function which returns a function implementing the coroutine interface.
 
 ### New
-When the "new" operator is called with an object, as in `new obj(...args)`, first a new object is created with slots allocated based on the public/private fields of the object. Then, its prototype is set to the original object. Finally, the `new` method is called on the newly created object.
+`"new" type [params]`
+
+The `new` operator doesn't have special handling by the language, it's syntax sugar for calling the global `new` function. The standard library implements the global function as a wrapper around an operator overload, `type->object.proto(type).new(...params)`.
+
+## Second-order object model
+The standard library implements a class-like object model on top of the built in prototype object model by maintaining separate `class` and `instance` prototype chains, kept synchronized by coreferences of the same names. This enables type algebra syntaxes (including a `new` operator performed on types), as a flat prototype chain would give types the same operators their parents implement for the instances.
 
 ```
-proto {
-	var x = 20;
-	public y = 30;
-	private z = 40;
-	
-	static call() {
-		new this();
-	}
-	public call() {
-		
-	}
-}
-==>
-{
-	proto: object,
-	
-	public: ["call", "y"],
-	private: ["z"],
-	
-	x: 20,
-	
-	call() { new this(); },
-	
-	# New may be one of the more complicated constructions because it has
-	#  a lot of code which is autogenerated from the syntax sugar, and on
-	#  top of that it already has the semantics of using the return value.
-	#  If there is no return (which is the vast majority of cases), we
-	#  don't want to return the last value like a normal function or else
-	#  `return this` will be mandatory for functional code. Maybe we could
-	#  just append `return this` to the function named new in a proto
-	#  expression?
-	new() {
-		this.y = 30;
-		this.z = 40;
-		this.call = function call() {}
-	}
-}
-```
-
-### After
-The `after` keyword is a pretty exotic addition. In effect, it's a reversal of the `;` operator. The first value is the result, and the second value is evaluated afterwards, but its value is ignored. This was implemented to accomodate a common programming pattern:
-
-```js
-var tmp = this.doThing();
-this.doAnotherThing();
-return tmp;
-```
-
-which can be replaced with:
-
-```js
-return this.doThing() after this.doAnotherThing();
-```
-
-This is also a generalization of the `try`-`finally` construct present in many C++ descendents. Where that is ordinarily a fairly rarely used keyword with only one contextual use-case, this has broad generic meaning which is valid in both contexts. Thus
-
-```js
-try x after y
-```
-
-is actually *parsed* as
-
-```js
-(try x) after y
-```
-
-As a side note, this can also be used to swap variables:
-```js
-x = y after y = x
-```
-
-expanding to
-```js
-x = (
-	var tmp = y;
-	y = x;
-	tmp
-)
+none ⟵ metaobject ⟵ class ⟵ Parent ⟵ type
+ ↑                    ⥮      ⥮       ⥮
+ └───────────────── {...} ⟵ {...} ⟵ {...} ⟵ new type
 ```
 
 ## Type hierarchy
@@ -564,8 +551,8 @@ none
 	any
 		primitive
 			number
-				bool
 				int
+					bool
 					uint
 						u8 u16 u32 u64
 					sint
@@ -595,78 +582,26 @@ none
 We also have these types
 
 tuple: (x, y, z)
-list: int[]
+array: int[]
 object: {x: int, y: string, z: (int, int)}
 nullable: type?
 function: (int, int) => int
 union: int|float
 intersection: int&string (like char)
 
-### Prototype syntax
-Names in square brackets "[]" denote optional tokens.
-```js
-proto [ChildName] [is Parent ["," OtherParent]*] {
-	var publicvar;
-	public publicvar2;
-	private privatevar;
-	static varonChild;
-	
-	new() {
-		# Constructor
-		# Note that this method is treated specially by adding autogenerated
-		#  code to initialize any default values
-	}
-	
-	# The braces here are literal, ala JS
-	get ["method"]() { #* method syntax is supported *# }
-	
-	static func() { #* static can apply to any method pattern *# }
-	static async func*() { #* like this *# }
-}
-```
-
-## Value types
-Syntactically, there are two types of values, L-value and R-value. This enables several powerful syntax features which would otherwise be indefinite lookahead, which are destructuring, lambda functions, and immediate functions. The grammar is defined so a subtree is LR, then subgrammars may be encountered which rule out either L or R. An LR-value might be eg an identifier, whereas an L-value might be `{x=10}` (object destructuring with default) and an R-value might be `10`. Because L and R are determined recursively, the value type of the topmost node determines the value type of the whole expression.
-
-```js
-{x, y, z} = destructuring_maps
-x, y, z = destructuring_sequences
-x => lambda
-(x, y) => lambda2
-[x, y, z] => lambda_taking_list
-{x, y, z} => lambda_taking_destructured_map
-immediate(x, y) = _function(y, x)
-```
-
-### Numbers
-Numbers are split between two types, int and float. Integers can be specified in base 2 with the prefix 0b, base 8 with the prefix 0o, base 16 with the prefix 0x, and all other numbers are base 10. Floats can be specified in base 10 with an optional exponent suffix, or base 16 with exponent expressed with p eg 0x123.456p-3. Both ints and floats can have their digits separated by an underscore. Numbers can also be suffixed by an identifier (with no spaces in between) which indicates a function to be called, eg 2px. Note that just a 0 prefix has no inherent meaning and is parsed as an ordinary decimal integer.
-
-### Strings
-Strings can use single quotes or double quotes which may be tripled with Pythonic semantics. Backticks are used for raw strings (escapes other than `\\` and ```\` ``` aren't processed). Single and double quoted strings are format strings by default, with string interpolation being indicated by `\{...}`. String interpolation doesn't support nesting quotations to avoid excessive complexity in the tokenizer, so strings within the braces must use a different quote type from the surroundings. Comments are not supported. Strings can also be suffixed by an identifier which is a function to be called on it (taking priority over prefix functions)
-
-## Strict mode
-Strict mode uses the same syntax with different semantics to write code which can be unambiguously compiled AOT. Opting in lets one write low level code ala Asm.js or RPython and this feature is critical to enabling Espresso to self-host.
-
-In strict mode, typing is mandatory, operator overloads are disabled (only supporting operations between basic machine types), and values must be manually unboxed. A set of machine types is provided in strict mode specifically. Unboxing and type coercion is done via the `as` operator, which will fail if the `any` value has an incompatible type.
-
-One possible addition is an "unsafe" mode which enables pointers and pointer arithmetic. Unsafe code would require `unsafe import` which taints the calling code as unsafe. Then a module can be compiled into a binary format which can be imported safely, ala C#'s unsafe mode and /unsafe flag. Pointers could be implemented with a parametric type `ref[T]` and dereferenced with `ptr[]` - which conveniently acts like an lvalue in normal code. In this case, `ptr[0]` and `ptr[]` would be equivalent.
-
 # Implementation considerations
 ## Roadmap
 * MVP interpreter written in Python
 * Espresso parser written in Espresso
-* C++ codegen
+* Bytecode VM
 * JIT compilation
-
-## C++ IR runtime
-In the C++ codegen phase, a minimal runtime must be implemented in C++ (which can be used as reference for implementing that same runtime in Espresso). C++ was chosen because like Python, operator overloading is supported which makes the generated code resemble its origin more closely, and templating allows significant abstractions with minimal overhead and boilerplate.
 
 ## Boxing
 ### Invariants
 For a boxed value, integer value 0 should be interpretable as none to simplify nullish checks.
 
 ### 32-bit
-On 32 bit systems boxing must be done using pointer tagging (using the low bits to signal the encoded type). The particular implementation of value boxing is not exposed to Espresso code, and the most optimal implementation will differ between architectures, but the suggested format is:
+On 32 bit systems boxing must be done using pointer tagging with the low bits signalling the encoded type. The particular implementation of value boxing is not exposed to Espresso code, and the most optimal implementation will differ between architectures, but the suggested format is:
 
 Low 2 bits:
 * x1 = 31-bit small integer (smi)
@@ -714,7 +649,7 @@ A distinction is made between "live" and "heap" values. Live values are in use b
 Note that live and heap values are the same type on 32-bit systems and only differ on 64-bit systems.
 
 ### GC
-The GC algorithm I hope to use is heavily inspired by [this](http://wiki.luajit.org/New-Garbage-Collector) paper on a speculative GC for LuaJit 2.0 with special considerations made for Espresso's object model. The major points are:
+The GC algorithm I hope to use is heavily inspired by [this](http://wiki.luajit.org/New-Garbage-Collector) quasi-paper on a speculative GC for LuaJit 2.0 with special considerations made for Espresso's object model. The major points are:
 * 4 different allocation strategies depending on the object type
   - interning
     * "Immutable with fixed size and immortal"
@@ -731,7 +666,7 @@ The GC algorithm I hope to use is heavily inspired by [this](http://wiki.luajit.
 	* Free blocks of N size are kept in an intrusive pointer list with heads stored in the largest free block at index N
 	* Possibly support lazy moving with redirection pointers
 	* Allocations are for objects of a fixed size and do not support realloc
-	* Value types like string are allocated here because despite being immutable, they will be deallocated eventually so cannot be interned. Interning is also a waste of time if the string isn't going to be used as a key
+	* Value types are allocated here because despite being immutable, they will be deallocated eventually so cannot be interned. Interning is also a waste of time if the string isn't going to be used as a key
 	* Allocation policy: exact fit > bump allocation > best fit > new arena
   - heap (dynamic) allocation
     * "Mutable with dynamic size"
@@ -769,10 +704,15 @@ The GC algorithm I hope to use is heavily inspired by [this](http://wiki.luajit.
   - When processed (or overflows), convert to arena index and push to grey queue
 
 ### Bytecode
-Inevitably an IR bytecode must be developed to be 1. trivial to interpret in the Espresso runtime, 2. trivial to JIT compile, and 3. support strict mode semantics (both dynamic and strict typing). Wasm is likely to be the primary source of inspiration along with CPython. Both of these are quasi-stack machines, storing variables in slots and intermediates on a value stack.
+Inevitably an IR bytecode must be developed to be
+1. trivial to interpret in the Espresso runtime
+2. trivial to JIT compile
+3. support strict mode semantics (both dynamic and strict typing)
+
+Wasm is likely to be the primary source of inspiration along with CPython. Both of these are quasi-stack machines, storing variables in slots and intermediates on a value stack.
 
 ### JIT
-JIT is a hard problem here because we want to be as lightweight as possible, and available JIT libraries (LLVM, GNU libjit, etc) are not. It may be a better idea to take inspiration from LuaJIT, which uses DynAsm as an integrated dynamic assembler. That alone won't work well however because it requires a preprocessing stage, is developed with Lua specifically in mind, and has no (official) documentation. One possible library to look into is AsmJIT, though that is currently x86 only.
+JIT is a hard problem here because we want to be as lightweight as possible, and available JIT libraries (LLVM, GNU libjit, etc) are not. It may be a better idea to take inspiration from LuaJIT, which uses DynAsm as an integrated dynamic assembler. That alone won't work well however because it requires a preprocessing stage, is developed with Lua specifically in mind, and has no (official) documentation. One possible library to look into is AsmJIT, though that is currently x86 only. A long term goal could be to implement the JIT in espresso itself rather than using an external library, predicated on exposed unsafe syscalls.
 
 # Context
 ## Inspirations
@@ -780,19 +720,24 @@ Quick list of languages researched for feature integration:
 * JavaScript
   - JerryScript (tight constraints)
   - V8
-    * Cutting edge optimizing JIT (with examples of features which add significant complexity to the JIT pipeline)
+    * Cutting edge optimizing JIT (with examples of features which add significant complexity to the JIT pipeline for minimal benefit)
 	* Value boxing in 64-bit words
     * Hidden classes/shapes
 	* Inline cache
 	* Type inference
 	* Accumulator-based register bytecode
+	* Highlights the importance of multimethods, which V8 uses internally for specialized JITed functions
+  - Node.js
+    * Destructuring to import (`const {x, y} = require("z")`)
   - Core syntax
   - Prototype-based programming
   - Triple equals (strict comparison semantics replaced with unoverloadable identity comparison)
   - Destructuring syntax
+  - Template string literals
   - Variable declaration and scoping (only let semantics using var)
   - Arrow functions (recontextualized as a special destructuring)
   - Untyped exception handling
+  - Lessons in the pitfalls of too-dynamic code and too permissive auto-coercion
 * TypeScript
   - Type annotation semantics
 * Python
@@ -801,40 +746,54 @@ Quick list of languages researched for feature integration:
   - Type hierarchy (esp string/bytes/buffer, tuple/list)
   - Comparison operator chaining
   - Loop-else (extended, Pythonic semantics inverted)
-  - String qualifier prefixes and triple quoting
+  - String triple quoting
   - Generalized user-defined decorators
   - Docstrings (Comments before statements) - generally, keeping documentation and debug information in a REPL environment
-  - Parameter annotations
-  - Keyword operators (in, is, as)
+  - Keyword operators (`in`, `is`, `and`, `or`, `not`, ...)
+    * Compound keyword operators `is not` and `not in`
   - In-place operator overloading
-  - With block
+  - match-case pattern matching and destructuring
+  - Metaclasses and inheritance hooks
+  - With block (and `contextmanager`)
+  - Static type annotations after 30 years indicates pure duck/dynamic typing is a bad idea
+  - Annoyance with `import x` vs `from x import y` syntax inspiring Espresso's `import x as {y}` because changing `import` to `from` is annoying
+  - Numpy (demonstrates highly dynamic VM tying together bare metal code is viable)
+  - PyPy 
+    * Lessons in self-hosting via restricted subsets of a dynamic language
+	* Stacklets and continulets as a practical and composable implementation of stackful coroutines
 * Lua (philosophy, implementation/internals, nil)
+  - "Less is more" philosophy, especially wrt parser simplicity
   - LuaJIT (simple JIT implementation)
   - Field calling eg f{a=10, b=20} or f "string"
   - Metatables (combined with JS prototyping, operator overloading begins resolution at the prototype, not own properties)
-  - Property chains for function name (eg function a.b.c() end)
+  - Property chains for function name (eg `function a.b.c() end`)
   - Register bytecode for addressing virtual stack-allocated variables
   - Upvalues
+  - Stackful coroutines via ordinary functions
   - Operator overload functions not having an explicit reversed function (ala Python's `__radd__`)
   - 1-based indexing is a bad idea
   - "Everything is a table" is a nice idea, but Lua has been slowly backtracking because it actually increases complexity and decreases performance because you effectively have to reimplement type checking
 * Julia
   - Number suffixes are normal function calls (previously considered having a special namespace but Julia just uses eg 1im which is much more elegant and still easy to read)
-  - String prefixes are syntax sugar for macro calls, let's use that for both string prefixes and number suffixes - wait, this would make spaces semantic, or else disable unparenthesized string function calls. Not a huge loss, the usage in Lua is unclear
   - Dedenting triple quoted strings
   - Strings are always formatted implicitly
   - Colon prefix to make symbols (also used in Ruby) and lispian quoting of expressions with interpolation (might use \ instead actually)
   - @ macros (composes well with the decorator syntax)
   - Implicit return of last value
+  - Highlights the importance of multimethods
 * Dart (concurrency model, JS concept streamlining)
 * Scala (operators as valid contextual identifiers)
 * Java (public/private/static)
+  - Labeled blocks
 * PHP (break/continue on int)
 * C (syntax, string/int char)
 * C++ (scope operator ::)
   - Scope operator ::
   - String suffixes
-* Ruby (redo)
+  - Operator overloading
+  - `concept` generalized and expanded to anything which overrides `is` operator
+  - Metaclass proposal is a big inspiration for `proto`
+* Slate (Prototypes with Multi-Dispatch)
 
 ## Key assumptions
 This is a list of assumptions made about the programming style and data utilization of a program in order to optimize the most common case:
@@ -846,3 +805,5 @@ This is a list of assumptions made about the programming style and data utilizat
 
 ## Design notes
 I originally thought `=` could be a meta-operator combining with any arbitrary binary operator to its left, such that eg `+ =` would be the same as `+=`. This is "pretty" from a high level design POV, but in implementing the parser I realized that this combined with the precedence climbing algorithm produced a fundamental contradiction. The normal operator could only be consumed if we knew its precedence was sufficiently high, but the `=` meta-operator would change its precedence to one of the lowest. Thus we need to consume the token to know its precedence, but we can't consume the token until we know its precedence. There were some "clever" hacks to try to get around this (tentatively consuming for sufficient precedence, then bailing if we parse `=` and modifying `self.cur` to semantically combine them) but the complexity grew and grew, all to implement a feature that, let's face it, has no practical value. I only thought of it in the first place because I thought it would make parsing easier, but it turns out it would require either a lot of extra code or I'd have to upgrade the parser to LR(2).
+
+Alternatively, this could be implemented on the tokenizer level, or a separate stage of the pipeline

@@ -5,7 +5,7 @@
 #include <cstring>
 
 bool esp_ideq(const Value& x, const Value& y) {
-	return x._value == y._value;
+	return x.raw() == y.raw();
 }
 
 struct Arguments {

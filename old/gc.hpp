@@ -41,6 +41,11 @@ constexpr uint cell2size(uint cell) {
 }
 
 /**
+ * GC cells always take up 32 bits
+ */
+using uintcell_t = uint32_t;
+
+/**
  * Cells are the basic memory unit of an arena, ideally set to the size of
  *  the smallest valid GCObject. In the original algorithm this was set to
  *  16 bytes, possibly because Lua uses tagged unions which have a minimum
@@ -102,8 +107,12 @@ struct GCHeader {
 		_value = size<<8 | type&0x1f | 0<<2 | 0<<1 | 0<<0;
 	}
 	
+	inline uint size() const noexcept {
+		return _value>>16;
+	}
+	
 	inline uint cells() const noexcept {
-		return _value>>8;
+		return size()*4;
 	}
 	
 	inline Type type() const noexcept {
@@ -135,10 +144,10 @@ struct GCObject {
 	/**
 	 * Recover the GCHeader (immediately before `this`)
 	**/
-	inline GCHeader& gco() {
+	inline GCHeader& gco() noexcept {
 		return *(GCHeader*)(((uint8_t*)this) - sizeof(GCHeader));
 	}
-	inline const GCHeader& gco() const {
+	inline const GCHeader& gco() const noexcept {
 		return const_cast<GCObject*>(this)->gco();
 	}
 	
@@ -150,12 +159,20 @@ struct GCObject {
 	void operator delete(void*) = delete;
 };
 
-namespace {
-	// Compare so top() is the smallest (least number of f)
-	constexpr bool arena_cmp(ArenaHandle* a, ArenaHandle* b) {
-		return a->unused() < b->unused();
+/**
+ * Base class for GCObjects which represent a sequence of values of fixed size.
+ */
+template<typename T>
+struct GCArray : public GCObject {
+	union {
+		uintcell_t cells[0];
+		T data[0];
+	};
+	
+	size_t length() const noexcept {
+		return gco().size()/sizeof(T);
 	}
-}
+};
 
 struct GC {
 	std::priority_queue<
@@ -174,16 +191,65 @@ struct GC {
 		roots.erase(v);
 	}
 	
+	/*
 	template<typename T>
 	T& alloc(size_t bytes) {
 		LOG_DEBUG("GC: Alloc %d bytes as %s", bytes, typeid(T).name());
 		return *new(arenas.top()->alloc(bytes)) T(bytes);
 	}
+	*/
 	
-	GCObject* alloc_raw(size_t bytes) {
-		LOG_DEBUG("GC: Alloc %d bytes as raw", bytes);
-		GCObject* p = arenas.top()->alloc(bytes);
-		new (p) GCObject(bytes, GCObject::USERDATA);
+	template<typename T>
+	T& alloc() {
+		LOG_DEBUG("GC: Alloc %d bytes as %s", sizeof(bytes), typeid(T).name());
+		return *new(arenas.top()->alloc(bytes)) T(bytes);
+	}
+	template<typename T>
+	T& alloc(const T& x) {
+		return alloc<T>() = x;
+	}
+	
+	GCObject* alloc_raw(size_t bytes);
+};
+
+/**
+ * Compressed pointer, calculated as a reference relative to the value's
+ *  address.
+**/
+template<typename T, typename BASE=uint32_t, size_t ALIGN=sizeof(void*)>
+struct CPtr {
+private:
+	BASE ptr;
+	
+	/**
+	 * The alignment of the target of a compressed pointer, as a pointer to
+	 *  a uint8_t array of the right number of bytes.
+	**/
+	typedef uint8_t (*align_t)[ALIGN];
+public:
+	CPtr(): ptr(0) {}
+	CPtr(T* p) {
+		*this = p;
+	}
+	
+	operator const T*() const {
+		return ptr? (const T*)(((align_t)&ptr) + ptr) : nullptr;
+	}
+	operator T*() {
+		return ptr? (T*)(((align_t)&ptr) + ptr) : nullptr;
+	}
+	
+	CPtr& operator=(T* p) {
+		ptrdiff_t dif = p - &ptr;
+		dif = dif < 0? -dif : dif;
+		
+		if(dif < (1L<<sizeof(BASE))) {
+			ptr = p - &ptr;
+		}
+		else {
+			ptr = gc.alloc_longptr(p) - &ptr;
+		}
+		return *this;
 	}
 };
 

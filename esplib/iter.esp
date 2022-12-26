@@ -1,9 +1,10 @@
+#**
+ * Join an iterable into a string using a separator
+**#
 export function join(this, separator=", "): string {
-	var it = this.iter();
-	var str = string(it.next());
-	if(str === StopIteration) {
-		return "";
-	}
+	var it = this.iter(), str = it.next();
+	if(str === undefined) return "";
+	str = str as string;
 	for(var x in it) {
 		str += separator;
 		str += x;
@@ -12,12 +13,18 @@ export function join(this, separator=", "): string {
 	return str;
 }
 
-export function yield filter(this, predicate) {
+#**
+ * Yield elements of an iterable which satisfy the predicate.
+**#
+export function ...filter(this, predicate) {
 	for(var x in this) {
-		if(predicate(x)) yield x;
+		if(x is predicate) yield x;
 	}
 }
 
+#**
+ * Iteratively call `combinator` on each element until one value remains.
+**#
 export function reduce(this, combinator, initial=none) {
 	var acc = initial;
 	for(var x in this) {
@@ -26,31 +33,191 @@ export function reduce(this, combinator, initial=none) {
 	return acc;
 }
 
-export function yield map(this, transform) {
+#**
+ * Get the maximum value in an iterable.
+**#
+export function max(...this) {
+	var it = this.iter(), max = it.next();
+	for(var x in it) {
+		if(x > max) {
+			max = x;
+		}
+	}
+	
+	return max;
+}
+
+#**
+ * Get the minimum value in an iterable.
+**#
+export function min(...this) {
+	var it = this.iter(), min = it.next();
+	for(var x in it) {
+		if(x < min) {
+			min = x;
+		}
+	}
+	
+	return min;
+}
+
+#**
+ * Sum the elements of an iterable
+**#
+export function sum(this) {
+	var it = this.iter(), initial = it.next();
+	return reduce(it, (a, b) => a + b, initial);
+}
+
+#**
+ * Call `transform` on each element and yield the result
+**#
+export function ...map(this, transform) {
 	for(var x in this) {
 		yield transform(x);
 	}
 }
 
-export function any(this, predicate): bool {
+#**
+ * Iterate over a number of disparate iterables and yield a tuple of
+ *  their elements.
+**#
+export function ...zip(...args): tuple {
+	var its = list(args->map(iter));
+	loop yield tuple(
+		for(var it in its) {
+			var res = it.next();
+			if(res === undefined) return else res;
+		}
+	);
+}
+
+#**
+ * Return a tuple of iterators which yield elements of `this` which
+ *  satisfy the corresponding predicates. Elements which don't match any
+ *  predicates are put in the last iterator.
+ *
+ * Most common usage is iterable->partition(predicate) (a single predicate)
+ *  which will return (iterator 1, iterator 2) where iterator 1 is elements
+ *  which satisfy the predicate, and iterator 2 is elements which don't.
+**#
+export function partition(this, ...predicates) {
+	# Multiple iterators are going over a single iterable - buckets is a
+	#  FIFO queue which stores elements which satisfy a different predicate
+	#  than whatever is being iterated over currently
+	var buckets = tuple(for(predicates.length + 1) []);
+	
+	# Note: Because we don't know what kind of iterator this is,
+	#  we can't assume we can use it in a for loop because it
+	#  will be simultaneously iterated over multiple times.
+	var it = this.iter();
+	
+	return tuple(zip(buckets, predicates)->map(function ...(bucket, pred) {
+		loop {
+			# If there's nothing in the queue
+			if(bucket.length == 0) {
+				# Iterate until we find one that is
+				loop {
+					var nv = it.next();
+					if(nv === undefined) return;
+				}
+				while(nv is not pred) {
+					# Search for the predicate that matches
+					for(var [ab, ap] in zip(buckets, predicates)) {
+						if(ap === pred) continue;
+						
+						if(nv is ap) {
+							ab.push(nv);
+							break;
+						}
+					}
+					# None match, put in the default bucket
+					then buckets[-1].push(nv);
+				}
+				then yield nv;
+			}
+			else yield bucket.pop_front();
+		}
+	}));
+}
+
+#**
+ * Return the nth element of an iterable which satisfies a predicate
+**#
+export function nth(this, n: unsigned, predicate=truthy) {
 	for(var x in this) {
-		if(predicate(x)) return true;
+		if(x is predicate and --n) return x;
+	}
+}
+
+#**
+ * Return the first element of an iterable which satisfies a predicate
+**#
+export function first(this, predicate=truthy) {
+	for(var x in this) {
+		if(x is predicate) return x;
+	}
+}
+
+#**
+ * Iterate over an iterable and return whether or not some element
+ *  satisfies the predicate
+**#
+export function some(this, predicate=truthy): bool {
+	for(var x in this) {
+		if(x is predicate) return true;
 	}
 	return false;
 }
 
-export function every(this, predicate): bool {
+#**
+ * Iterate over an iterable and return whether or not every element
+ *  satisfies the predicate
+**#
+export function every(this, predicate=truthy): bool {
 	for(var x in this) {
-		if(!predicate(x)) return false;
+		if(x is not predicate) return false;
 	}
 	return true;
 }
 
-export function range(x, y, inc=1) {
-	var i = x;
-	return loop i += inc while(i < y);
+#**
+ * Iterate over a range between the start and stop with a given step.
+**#
+export function ...range(start, stop=inf, step=1) {
+	var i = start;
+	yield ...loop i += step while(i < stop);
 }
 
-return function iter(this) {
+#**
+ * Yield `this` `n` times.
+**#
+export function ...repeat(this, n=inf) {
+	yield ...for(n) this;
+}
+
+#**
+ * Nondestructively copy an iterator `count` times using FIFO queues as
+ *  buffers.
+**#
+export function tee(this, count=2) {
+	var it = this.iter();
+	var dqs = tuple(for(..count) []);
+	
+    return tuple(dqs->map(function ...(dq) {
+		loop {
+			if(not dq) {
+				for(var nv in it) {
+					for(var d in dqs) d.push(nv);
+				}
+			}
+			yield dq.pop_front();
+		}
+	}));
+}
+
+export function iter(this) {
 	return this.iter();
 }
+
+return iter;

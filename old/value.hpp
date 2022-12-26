@@ -1,85 +1,104 @@
-#ifndef VALUE_H
-#define VALUE_H
+/**
+ * @file value.hpp
+ * 
+ * Define the types and structures for dealing with values.
+ */
+#ifndef ESP_base_value_HPP
+#define ESP_base_value_HPP
 
 #include "common.h"
 #include "gc.hpp"
 
-#include <cstdint>
-#include <cassert>
-
-#include <bit>
-
-#if INTPTR_MAX == INT64_MAX
-	#define ESP_BITS 64
-#elif INTPTR_MAX == INT32_MAX
-	#define ESP_BITS 32
-#else
-	#error "Unknown pointer size or missing size macros!"
-#endif
-
-#define ESP_NONE 0
-#define ESP_FALSE 1
-#define ESP_EMPTY 2
-#define ESP_TRUE 6
-
-#ifndef __cpp_char8_t
-	#if __CHAR_BIT__ == 8
-		using char8_t = char;
-	#else
-		using char8_t = uint8_t;
-	#endif
-#endif
-#ifndef __cpp_char32_t
-	using char32_t = uint32_t;
-#endif
-
-using hash_t = uint64_t;
-
-/**
- * Compressed pointer, calculated as a reference relative to the value's
- *  address.
-**/
-template<typename T, typename BASE=uint32_t, size_t ALIGN=sizeof(void*)>
-struct CPtr {
-private:
-	BASE ptr;
-	
-	/**
-	 * The alignment of the target of a compressed pointer, as a pointer to
-	 *  a uint8_t array of the right number of bytes.
-	**/
-	typedef uint8_t (*align_t)[ALIGN];
-public:
-	CPtr(): ptr(0) {}
-	CPtr(T* p) {
-		*this = p;
-	}
-	
-	operator const T*() const {
-		return ptr? (const T*)(((align_t)&ptr) + ptr) : nullptr;
-	}
-	operator T*() {
-		return ptr? (T*)(((align_t)&ptr) + ptr) : nullptr;
-	}
-	
-	CPtr& operator=(T* p) {
-		ptrdiff_t dif = p - &ptr;
-		dif = dif < 0? -dif : dif;
-		
-		if(dif < (1L<<sizeof(BASE))) {
-			ptr = p - &ptr;
-		}
-		else {
-			ptr = gc.alloc_longptr(p) - &ptr;
-		}
-		return *this;
-	}
-};
+#include <array>
+#include <type_traits>
+#include <memory>
 
 struct Value32;
+
 #if ESP_BITS == 64
+
 struct Value64;
+template<typename T> using HeapPtr = CPtr<T>;
+using LiveValue = Value64;
+
+#else
+
+template<typename T> using HeapPtr<T> = T*;
+using LiveValue = Value32;
+
 #endif
+
+using HeapValue = Value32;
+using Value = LiveValue;
+
+/// Warning: Mutual inclusion for "Value" dependency
+///  (must be after Value type definition)
+#include "builtin.hpp"
+
+#define ESP_NONE (Value{})
+#define ESP_FALSE (Value{false})
+#define ESP_EMPTY (Value::raw(0b1010))
+#define ESP_TRUE (Value{true})
+
+#define FUNC(type, name, tags, impl) \
+	type name(Value rhs) tags { return impl; }
+
+#define ESP_OP(name) FUNC(Value, name, const, esp_##name(*this, rhs))
+#define C_OP(name, op) FUNC(Value, operator op, const, name(rhs))
+#define C_IOP(name, op) \
+	FUNC(BaseValue<Child>&, operator op##=, , *this = name(rhs))
+#define X_OP(name, op) ESP_OP(name) C_OP(name, op) C_IOP(name, op)
+#define BOOL_OP(name, op) FUNC(bool, operator op, const, name(rhs))
+
+/**
+ * Base bag of methods which both value types inherit from to enable the same
+ *  execution model to use different representations.
+ */
+template<typename Child>
+struct BaseValue {
+	X_OP(add, +) X_OP(sub, -) X_OP(mul, *) X_OP(div, /) X_OP(mod, %)
+	ESP_OP(pow) ESP_OP(idiv) ESP_OP(mod2)
+	
+	X_OP(lsh, <<) X_OP(rhs, >>) ESP_OP(lsh3) ESP_OP(ash)
+	X_OP(xor, ^) X_OP(band, &) X_OP(bor, |)
+	
+	Value inv() const { return esp_inv(*this); }
+	Value operator~() const { return inv(); }
+	bool operator!() const { return !(bool)*this; }
+	
+	BOOL_OP(gt, >) BOOL_OP(ge, >=) BOOL_OP(lt, <) BOOL_OP(le, <=)
+	BOOL_OP(eq, ==) BOOL_OP(ne, !=)
+	bool ideq(Value rhs) { return esp::op_ideq(*this, rhs); }
+	bool idne(Value rhs) { return esp::op_idne(*this, rhs); }
+	
+	ESP_OP(in) ESP_OP(is) ESP_OP(as) ESP_OP(has)
+	
+	Value del(Value rhs) { return esp::op_del(*this, rhs); }
+	
+	class IndexLValue : public Child {
+	private:
+		Child& obj;
+		Value key;
+		
+	public:
+		Child& operator=(Value val) {
+			esp::op_set(obj, key, val);
+			return *this;
+		}
+		operator Value() const { return obj; }
+	};
+	
+	IndexLValue operator[](Value v) {
+		return {*this, v};
+	}
+	
+	#undef FUNC
+	#undef ESP_OP
+	#undef C_OP
+	#undef C_IOP
+	#undef X_OP
+	#undef BOOL_OP
+};
 
 /**
  * Values in the heap are always 32 bits. On 64-bit platforms they use
@@ -88,16 +107,54 @@ struct Value64;
  * 
  * xxx1 = smi
  * xx00 = GCObject* (NULL = none)
- * xx10 = 
- *   0010 = false (2)
- *   0110 = true (6)
- *   1010 = empty (10)
- *   1110 = char (14)
- *  10010 = intern
- *  10110 = symbol
+ * xxx10 =
+ *   0
+ *    0010 = false (2)
+ *    0110 = true (6)
+ *    1010 = empty (10)
+ *    1110 = char (14) (utf-32 encoding, only 21 bits used)
+ *   1
+ *    0010 = intern
+ *    0110 = symbol
+ *    1010 = cstring
+ *    1110 = 
 **/
-struct Value32 {
-	uint32_t _value;
+struct Value32 : public BaseValue<Value32> {
+protected:
+	using value_t = uint32_t;
+	value_t _base_value;
+	
+	static constexpr int
+		none_bits = 0, true_bits = 0b0010, false_bits = 0b0110;
+
+public:
+	Value32(): _base_value(none_bits) {}
+	Value32(GCObject* gco): _base_value(((size_t)gco)<<2) {}
+	Value32(bool v): _base_value(v? true_bits : false_bits) {}
+	
+	Value32(int32_t v) {
+		uint32_t uv = bit_cast<uint32_t>(v);
+		_base_value = (uv < (1UL<<31))? (uv<<1)|1 : (uint32_t)&gc.alloc(v);
+	}
+	Value32(int64_t v) { _base_value = (value_t)&gc.alloc(v); }
+	Value32(float v) { _base_value = (value_t)&gc.alloc(v); }
+	Value32(double v) { _base_value = (value_t)&gc.alloc(v); }
+	
+	/**
+	 * Convert a raw integer to a Value32
+	 */
+	static Value32 raw(value_t x) {
+		Value32 v;
+		v._base_value = x;
+		return v;
+	}
+	
+	value_t raw() const { return _base_value; }
+	
+	Value32& operator=(Value v) {
+		_base_value = v.raw();
+		return *this;
+	}
 	
 	template<typename T>
 	constexpr bool is() const noexcept;
@@ -106,68 +163,44 @@ struct Value32 {
 	constexpr T as() const;
 	
 #if ESP_BITS == 64
-	inline operator Value64() const {
-		
-	}
+	operator Value64() const;
 #endif
 };
 
 template<>
 constexpr bool Value32::is<bool>() const noexcept {
-	return _value == ESP_TRUE || _value == ESP_FALSE;
+	return _base_value == true_bits || _base_value == true_bits;
 }
 template<>
 constexpr bool Value32::as<bool>() const {
 	assert(is<bool>());
-	return _value&(ESP_TRUE^ESP_FALSE);
+	return _base_value&(true_bits^false_bits);
 }
 
 template<>
 constexpr bool Value32::is<int32_t>() const noexcept {
-	return _value&1;
+	return _base_value&1;
 }
 template<>
 constexpr int32_t Value32::as<int32_t>() const {	
 	assert(is<int32_t>());
 	// Divide by 2 to ensure sign extension
-	return ((int32_t)_value)/2;
+	return ((int32_t)_base_value)/2;
 }
 
 template<>
 constexpr bool Value32::is<void*>() const noexcept {
-	return !(_value&3);
+	return !(_base_value&3);
 }
 template<>
 constexpr void* Value32::as<void*>() const {
 	#if ESP_BITS == 64
 		// Word-aligned pointer relative to the heap address
-		return ((uintptr_t*)&_value) + _value;
+		return ((uintcell_t*)this) + _base_value;
 	#else
-		return (void*)_value;
+		return (void*)_base_value;
 	#endif
 }
-
-#if __cplusplus <= 201703L
-// Definition copied from https://en.cppreference.com/w/cpp/numeric/bit_cast
-template <class To, class From>
-typename std::enable_if_t<
-    sizeof(To) == sizeof(From) &&
-    std::is_trivially_copyable_v<From> &&
-    std::is_trivially_copyable_v<To>,
-    To>
-// constexpr support needs compiler magic
-bit_cast(const From& src) noexcept
-{
-    static_assert(std::is_trivially_constructible_v<To>,
-        "This implementation additionally requires destination type to be trivially constructible");
- 
-    To dst;
-    std::memcpy(&dst, &src, sizeof(To));
-    return dst;
-}
-#else
-	using std::bit_cast;
-#endif
 
 #if ESP_BITS == 64
 /**
@@ -271,9 +304,15 @@ bit_cast(const From& src) noexcept
  *   };
  * };
 **/
-struct Value64 {
-	uintptr_t _value;
+struct Value64 : public BaseValue<Value64> {
+protected:
+	using value_t = uintptr_t;
+	value_t _base_value;
 	
+	static constexpr int
+		none_bits = 0, false_bits = 0b010, true_bits = 0b011;
+	
+public:
 	enum class Tag {
 		SIMPLE = 0,
 		CHAR,
@@ -284,24 +323,57 @@ struct Value64 {
 		EXTENSION,
 		OPAQUE,
 		
+		GCOBJECT,
+		
 		NONE,
 		EMPTY,
 		FALSE,
 		TRUE,
 		FLOAT,
 		INT,
-		LONG,
+		LONG
 		
 	};
-
+	
+	Value64(): _base_value(none_bits) {}
+	
+	Value64(bool v): _base_value(v? true_bits : false_bits) {}
+	
+	Value64(int64_t v) {
+		if(v < (1L<<52)) {
+			// For integers, top 12 bits are filled
+			_base_value = (((1L<<12) - 1)<<51) | v;
+		}
+		else {
+			/// TODO
+			_base_value = -1;
+		}
+	}
+	Value64(double v) {
+		_base_value = ~bit_cast<uint64_t>(v);
+	}
+	
+	static Value64 raw(value_t x) {
+		Value64 v;
+		v._base_value = x;
+		return v;
+	}
+	
+	value_t raw() const { return _base_value; }
+	
+	Value64& operator=(Value v) {
+		_base_value = v.raw();
+		return *this;
+	}
+	
 private:
 	
 	constexpr bool sign() const noexcept {
-		return _value>>63;
+		return _base_value>>63;
 	}
 	
 	constexpr int head() const noexcept {
-		return (_value>>52)&0xfff;
+		return (_base_value>>52)&0xfff;
 	}
 	
 	constexpr int exponent() const noexcept {
@@ -309,15 +381,15 @@ private:
 	}
 	
 	constexpr int rawtag() const noexcept {
-		return (_value>>48)&0xf;
+		return (_base_value>>48)&0xf;
 	}
 	
 	constexpr uint64_t low52() const noexcept {
-		return _value&((1<<52) - 1);
+		return _base_value&((1<<52) - 1);
 	}
 	
 	constexpr uint64_t low48() const noexcept {
-		return _value&((1<<48) - 1);
+		return _base_value&((1<<48) - 1);
 	}
 
 public:	
@@ -330,15 +402,15 @@ public:
 		Tag t = static_cast<Tag>(rawtag());
 		// Check simple values
 		if(t == Tag::SIMPLE)
-			return static_cast<Tag>((_value&7) + (int)Tag::NONE);
+			return static_cast<Tag>((_base_value&7) + (int)Tag::NONE);
 		return t;
 	}
 	
 	template<typename T>
-	constexpr bool is() const {}
+	constexpr bool is() const { return false; }
 	
 	template<typename T>
-	constexpr T as() const {}
+	constexpr T as() const;
 	
 	operator bool() const {
 		switch(tag()) {
@@ -346,39 +418,36 @@ public:
 			case Tag::EMPTY:
 				return false;
 			
-			case Tag::BOOL:
-				return _value == ESP_TRUE;
+			case Tag::FALSE: return false;
+			case Tag::TRUE: return true;
 			
 			case Tag::INT:
-				return _value << 1;
+				return _base_value << 1;
 			
 			case Tag::FLOAT:
-				return bit_cast<double>(~_value) == 0.0;
+				return bit_cast<double>(~_base_value) != 0.0;
 			
 			case Tag::INTERN: // intern id 0 is the empty string
 			case Tag::CHAR: // \0 char
-				return _value>>3;
+				return _base_value>>3;
 			
-			// Non-interned string are always not-empty and so truthy
-			case Tag::STRING:
 			// 0 is always smi, so long is always truthy
 			case Tag::LONG:
 			// NULL pointers are none, not opaque
 			case Tag::OPAQUE:
 				return true;
 			
-			case Tag::DICT:
-				return as<Dict>().length();
-			
-			case Tag::OBJECT:
-				return as<Object>().to<bool>();
+			case Tag::GCOBJECT:
+				/// TODO: Doesn't respect operator overload
+				return true;
+				//return as<Object>().to<bool>();
 		}
 	}
 };
 
 template<>
 constexpr bool Value64::is<void>() const noexcept {
-	return _value == ESP_NONE;
+	return _base_value == none_bits;
 }
 	
 template<>
@@ -389,7 +458,7 @@ constexpr bool Value64::is<bool>() const noexcept {
 template<>
 constexpr bool Value64::as<bool>() const {
 	assert(is<bool>());
-	return _value&(ESP_TRUE^ESP_FALSE);
+	return _base_value&(true_bits^false_bits);
 }
 
 template<>
@@ -414,7 +483,7 @@ constexpr bool Value64::is<float>() const noexcept {
 template<>
 constexpr double Value64::as<double>() const {
 	assert(is<double>());
-	return bit_cast<double>(~_value);
+	return bit_cast<double>(~_base_value);
 }
 
 template<>
@@ -429,12 +498,12 @@ constexpr char32_t Value64::as<char32_t>() const {
 
 template<>
 constexpr bool Value64::is<void*>() const noexcept {
-	return !head() && !(_value&3);
+	return !head() && !(_base_value&3);
 }
 template<>
 constexpr void* Value64::as<void*>() const {
 	assert(is<void*>());
-	return (void*)_value;
+	return (void*)_base_value;
 }
 
 template<>
@@ -452,137 +521,8 @@ constexpr const char* Value64::as<const char*>() const {
 	return (const char*)as<void*>();
 }
 
-template<typename T>
-using HeapPtr = CPtr<T>;
-using LiveValue = Value64;
-using HeapValue = Value32;
-
-#else
-
-template<typename T>
-using HeapPtr<T> = T*;
-using LiveValue = Value32;
-using HeapValue = Value32;
-
 #endif
 
-using Value = LiveValue;
-using CFunction = Value(*)(Value, int, Value(*)[]);
-
-/**
- * Handle which keeps values alive while they're only referred to in native
- *  code. These are kept as a pool in the GC acting as roots for mark and
- *  sweep.
-**/
-struct Var : public Value {
-	inline Var() {
-		gc.register_root(this);
-	}
-	
-	inline ~Var() {
-		gc.remove_root(this);
-	}
-};
-
-/**
- * https://www.python.org/dev/peps/pep-0412/
- * 
- * Key-Sharing Dictionary from Python used as an optimization for prototype
- *  instantiation property offsets. A prototype instantiation by default
- *  uses a shared dictionary for property metadata and offsets with copy-
- *  on-write semantics.
- * 
- * https://morepypy.blogspot.com/2015/01/faster-more-memory-efficient-and-more.html
- * 
- * Also using the implementation of PyPy, which splits the hash table and
- *  actual keys/values using offsets into a values array. This preserves
- *  entry ordering for free and simplifies iterator logic.
-**/
-
-struct Dict : public GCObject {
-	struct Key {
-		bool writable : 1; // Can the value change?
-		bool removable : 1; // Property can be deleted?
-		bool configurable : 1; // Can the property be configured?
-		bool ispublic : 1; // Property is public? (private requires this.*)
-		bool isoffset : 1; // Interpret value as an offset into slots?
-		bool accessor : 1; // Property is an accessor
-		
-		HeapValue key;
-	};
-	
-	struct KeyValue : public Key {
-		HeapValue value;
-	};
-	
-	/**
-	 * DictEntry doesn't allocate values unless the shape is extended
-	**/
-	union Entry {
-		Key key;
-		KeyValue key_value;
-	};
-	
-	struct HashIndex : public GCObject {
-		uint16_t usable; // Number of usable entries (not sync'd with used)
-		uint16_t used; // Number of used entries
-		
-		// Width of indices determined by used
-		union {
-			uint8_t index8[0];
-			uint16_t index16[0];
-			uint32_t index32[0];
-			uint64_t index64[0];
-		};
-		
-		template<typename V>
-		void gc_visit(V& v) {}
-	};
-	
-	bool ownproto : 1; // Proto is an extension of the object's own properties
-	bool extended : 1; // Whether the dictionary stores values or offsets
-	HeapValue proto;
-	CPtr<HashIndex> index_map;
-	CPtr<Entry> entry_table;
-	
-	template<typename V>
-	void gc_visit(V& v) {
-		v.visit(proto);
-		v.visit(*keys);
-	}
-};
-
-/**
- * Object represents structures not expected to change, with fields
- *  allocated at creation time. Extensions are still supported via the
- *  metadata hash table.
-**/
-struct Object : public GCObject {
-	Dict* shape;
-	Value slots[0];
-	
-	template<typename V>
-	void gc_visit(V& v) {
-		v.visit(*shape);
-		for(int i = 0; i < nslots(); ++i) {
-			v.visit(slots[i]);
-		}
-	}
-};
-
-/**
- * Proto represents objects which are expected to be prototyped, so the
- *  relevant prototyping fields are stored explicitly rather than in the
- *  metadata dictionary.
-**/
-struct Proto : public GCObject {
-	DictKeys* proto; // Prototype shape
-	Dict* shape; // Object shape
-	Value slots[0];
-};
-
-struct DataPool {
-	
-};
+constexpr auto x = Value64::pow;
 
 #endif

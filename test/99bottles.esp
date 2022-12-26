@@ -17,5 +17,5 @@ while(x) {
 	print("\{howmany(x)} on the wall\n");
 	print("\{howmany(x)}.\n");
 	print("Take one down, pass it around,\n");
-	print("\{howmany(x = x - 1)} on the wall.\n\n")
+	print("\{howmany(--x)} on the wall.\n\n");
 }
