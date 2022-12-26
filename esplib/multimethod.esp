@@ -1,0 +1,53 @@
+proto multimethod is function {
+	private method: function;
+	new(method) {
+		this.method = method;
+	}
+	
+	call(...args) {
+		
+	}
+	
+	=(this, other) {
+		
+	}
+}
+
+#**
+ * Most generic form of multidispatch methods. Accepts an arbitrary dispatch
+ *  function
+**#
+proto metamethod(dispatch) is dict {
+	call(...args) {
+		return this[this->dispatch(...args)](...args);
+	}
+	
+	=(lhs, rhs) {
+		this[this->dispatch]
+	}
+}
+
+Entity
+	Player
+	Alien
+	Spaceship
+
+@method
+function collide(...args) {
+	var p = 0;
+	loop yield tuple(
+		for(var i, arg in 1..args) {
+			if(p[-i]) arg.proto else arg;
+		}
+	) after ++p;
+}
+
+@method
+function collide(x: Alien, y: Spaceship) {
+	
+}
+
+@method
+function collide(x: Player, y: Entity) {
+	
+}

@@ -1,0 +1,331 @@
+function op(code, imm, result, args) {
+	return {code, imm, result, args};
+}
+
+function nullary(code) op(code, none, (), none);
+
+export const ins = {
+	"unreachable": nullary(0x00),
+	"nop": nullary(0x01),
+	"block": nullary(0x02),
+	"loop": op(0x03, i32, none, ()),
+	"if": 0x04, "else": 0x05,
+	"try": 0x06, "catch": 0x07, "throw": 0x08, "rethrow": 0x09,
+	
+	"end": 0x0B,
+	"br": 0x0C, "br_if": 0x0D, "br_table": 0x0E,
+	"return": 0x0F,
+	"call": 0x10, "call_indirect": 0x11,
+	"return_call": 0x12, "return_call_indirect": 0x13,
+	
+	"delegate": 0x18, "catch_all": 0x19,
+	"drop": 0x1A, "select": 0x1B, "select_t": 0x1C,
+	
+	local: {
+		"get": 0x20, "set": 0x21, "tee": 0x22
+	},
+	global: {
+		"get": 0x23, "set": 0x24
+	},
+	table: {
+		"get": 0x25, "set": 0x26,
+		"init": 0xFC0C, "copy": 0xFC0E,
+		"grow": 0xFC0F, "size": 0xFC10, "fill": 0xFC11
+	},
+	memory: {
+		"size": 0x3F, "grow": 0x40,
+		"init": 0xFC08, "copy": 0xFC0A, "fill": 0xFC0B
+	},
+	ref: {
+		"null": 0xD0, "is_null": 0xD1, "func": 0xD2
+	},
+	data: {
+		"drop": 0xFC09
+	},
+	elem: {
+		"drop": 0xFC0D
+	},
+	
+	i32: {
+		"load": 0x28,
+		"load8_s": 0x2C, "load8_u": 0x2D,
+		"load16_s": 0x2E, "load16_u": 0x2F,
+		"store": 0x36, "store8": 0x3A, "store16": 0x3B,
+		
+		"const": 0x41,
+		
+		"eqz": 0x45, "eq": 0x46, "ne": 0x47,
+		"lt_s": 0x48, "lt_u": 0x49,
+		"gt_s": 0x4A, "gt_u": 0x4B,
+		"le_s": 0x4C, "le_u": 0x4D,
+		"ge_s": 0x4E, "ge_u": 0x4F,
+		
+		"clz": 0x67, "ctz": 0x68, "popcnt": 0x69,
+		
+		"add": 0x6A, "sub": 0x6B, "mul": 0x6C,
+		"div_s": 0x6D, "div_u": 0x6E,
+		"rem_s": 0x6F, "rem_u": 0x70,
+		
+		"and": 0x71, "or": 0x72, "xor": 0x73, "shl": 0x74,
+		"shr_s": 0x75, "shr_u": 0x76, "rotl": 0x77, "rotr": 0x78,
+		
+		"wrap_i64": 0xA7,
+		"trunc_f32_s": 0xA8, "trunc_f32_u": 0xA9,
+		"trunc_f64_s": 0xAA, "trunc_f64_u": 0xAB,
+		"reinterpret_f32": 0xBC,
+		"extend8_s": 0xC0, "extend16_s": 0xC1,
+		
+		"trunc_sat_f32_s": 0xFC00, "trunc_sat_f32_u": 0xFC01,
+		"trunc_sat_f64_s": 0xFC02, "trunc_sat_f64_u": 0xFC03
+	},
+	
+	i64: {
+		"load": 0x29,
+		"load8_s": 0x30, "load8_u": 0x31,
+		"load16_s": 0x32, "load16_u": 0x33,
+		"load32_s": 0x34, "load32_u": 0x35,
+		"store": 0x37, "store8": 0x3C, "store16": 0x3D, "store32": 0x3E,
+		
+		"const": 0x42,
+		
+		"eqz": 0x50, "eq": 0x51, "ne": 0x52,
+		"lt_s": 0x53, "lt_u": 0x54,
+		"gt_s": 0x55, "gt_u": 0x56,
+		"le_s": 0x57, "le_u": 0x58,
+		"ge_s": 0x59, "ge_u": 0x5A,
+		
+		"clz": 0x79, "ctz": 0x7A, "popcnt": 0x7B,
+		
+		"add": 0x7C, "sub": 0x7D, "mul": 0x7E,
+		"div_s": 0x7F, "div_u": 0x80,
+		"rem_s": 0x81, "rem_u": 0x82,
+		
+		"and": 0x83, "or": 0x84, "xor": 0x85, "shl": 0x86,
+		"shr_s": 0x87, "shr_u": 0x88, "rotl": 0x89, "rotr": 0x8A,
+		
+		"extend_i32_s": 0xAC, "extend_i32_u": 0xAD,
+		"trunc_f32_s": 0xAE, "trunc_f32_u": 0xAF,
+		"trunc_f64_s": 0xB0, "trunc_f64_u": 0xB1,
+		
+		"reinterpret_f64": 0xBD,
+		
+		"extend8_s": 0xC2, "extend16_s": 0xC3, "extend32_s": 0xC4,
+		
+		"trunc_sat_f32_s": 0xFC04, "trunc_sat_f32_u": 0xFC05,
+		"trunc_sat_f64_s": 0xFC06, "trunc_sat_f64_u": 0xFC07
+	},
+	
+	f32: {
+		"load": 0x2A, "store": 0x38, "const": 0x43,
+		
+		"eq": 0x5B, "ne": 0x5C,
+		"lt": 0x5D, "gt": 0x5E,
+		"le": 0x5F, "ge": 0x60,
+		
+		"abs": 0x8B, "neg": 0x8C,
+		"ceil": 0x8D, "floor": 0x8E, "trunc": 0x8F, "nearest": 0x90,
+		"sqrt": 0x91,
+		"add": 0x92, "sub": 0x93, "mul": 0x94, "div": 0x95,
+		"min": 0x96, "max": 0x97, "copysign": 0x98,
+		
+		"convert_i32_s": 0xB2, "convert_i32_u": 0xB3,
+		"convert_i64_s": 0xB4, "convert_i64_u": 0xB5,
+		"demote_f64": 0xB6,
+		
+		"reinterpret_i32": 0xBE
+	},
+	
+	f64: {
+		"load": 0x2B, "store": 0x39, "const": 0x44,
+		
+		"eq": 0x61, "ne": 0x62,
+		"lt": 0x63, "gt": 0x64,
+		"le": 0x65, "ge": 0x66,
+		
+		"abs": 0x99, "neg": 0x9A,
+		"ceil": 0x9B, "floor": 0x9C, "trunc": 0x9D, "nearest": 0x9E,
+		"sqrt": 0x9F,
+		"add": 0xA0, "sub": 0xA1, "mul": 0xA2, "div": 0xA3,
+		"min": 0xA4, "max": 0xA5, "copysign": 0xA6,
+		
+		"convert_i32_s": 0xB7, "convert_i32_u": 0xB8,
+		"covnert_i64_s": 0xB9, "convert_i64_u": 0xBA,
+		"promote_f32": 0xBB,
+		
+		"reinterpret_i64": 0xBF
+	}
+	
+	v128: {
+		"load": 0xFD00,
+		"load8x8_s": 0xFD01, "load8x8_u": 0xFD02,
+		"load16x4_s": 0xFD03, "load16x4_u": 0xFD04,
+		"load32x2_s": 0xFD05, "load32x2_u": 0xFD06,
+		"load8_splat": 0xFD07, "load16_splat": 0xFD08,
+		"load32_splat": 0xFD09, "load64_splat": 0xFD0A,
+		"store": 0xFD0B, "const": 0xFD0C,
+		
+		"not": 0xFD4D, "and": 0xFD4E, "andnot": 0xFD4F,
+		"or": 0xFD50, "xor": 0xFD51,
+		"bitselect": 0xFD52, "any_true": 0xFD53,
+		"load8_lane": 0xFD54, "load16_lane": 0xFD55,
+		"load32_lane": 0xFD56, "load64_lane": 0xFD57,
+		"store8_lane": 0xFD58, "store16_lane": 0xFD59,
+		"store32_lane": 0xFD5A, "store64_lane": 0xFD5B,
+		"load32_zero": 0xFD5C, "load64_zero": 0xFD5D
+	},
+	
+	i8x16: {
+		"shuffle": 0xFD0D, "swizzle": 0xFD0E, "splat": 0xFD0F,
+		
+		"extract_lane_s": 0xFD15, "extract_lane_u": 0xFD16,
+		"replace_lane": 0xFD17,
+		
+		"eq": 0xFD23, "ne": 0xFD24,
+		"lt_s": 0xFD25, "lt_u": 0xFD26,
+		"gt_s": 0xFD27, "gt_u": 0xFD28,
+		"le_s": 0xFD29, "le_u": 0xFD2A,
+		"ge_s": 0xFD2B, "ge_u": 0xFD2C,
+		
+		"abs": 0xFD60, "neg": 0xFD61,
+		
+		"popcnt": 0xFD62, "all_true": 0xFD63, "bitmask": 0xFD64,
+		
+		"narrow_i16x8_s": 0xFD65, "narrow_i16x8_u": 0xFD66,
+		
+		"shl": 0xFD6B, "shr_s": 0xFD6C, "shr_u": 0xFD6D,
+		"add": 0xFD6E, "add_sat_s": 0xFD6F, "add_sat_u": 0xFD70,
+		"sub": 0xFD71, "sub_sat_s": 0xFD72, "sub_sat_u": 0xFD73,
+		
+		"min_s": 0xFD76, "min_u": 0xFD77,
+		"max_s": 0xFD78, "max_u": 0xFD79,
+		"trunc": 0xFD7A, "avgr_u": 0xFD7B
+	},
+	
+	i16x8: {
+		"splat": 0xFD10,
+		"extract_lane_s": 0xFD18, "extract_lane_u": 0xFD19,
+		"replace_lane": 0xFD1A,
+		
+		"eq": 0xFD2D, "ne": 0xFD2E,
+		"lt_s": 0xFD2F, "lt_u": 0xFD30,
+		"gt_s": 0xFD31, "gt_u": 0xFD32,
+		"le_s": 0xFD33, "le_u": 0xFD34,
+		"ge_s": 0xFD35, "ge_u": 0xFD36,
+		
+		"extadd_pairwise_i8x16_s": 0xFD7C, "extadd_pairwise_i8x16_u": 0xFD7D,
+		"abs": 0xFD80, "neg": 0xFD81, "q15mulr_sat_s": 0xFD82,
+		"all_true": 0xFD83, "bitmask": 0xFD84,
+		"narrow_i32x4_s": 0xFD85, "narrow_i32x4_u": 0xFD86,
+		"extend_low_i8x16_s": 0xFD87, "extend_high_i8x16_s": 0xFD88,
+		"extend_low_i8x16_u": 0xFD89, "extend_high_i8x16_u": 0xFD8A,
+		"shl": 0xFD8B, "shr_s": 0xFD8C, "shr_u": 0xFD8D,
+		"add": 0xFD8E, "add_sat_s": 0xFD8F, "add_sat_u": 0xFD90,
+		"sub": 0xFD91, "sub_sat_s": 0xFD92, "sub_sat_u": 0xFD93,
+		"mul": 0xFD94,
+		"min_s": 0xFD96, "min_u": 0xFD97,
+		"max_s": 0xFD98, "max_u": 0xFD99,
+		
+		"avgr_u": 0xFD9B,
+		"extmul_low_i8x16_s": 0xFD9C, "extmul_high_i8x16_s": 0xFD9D,
+		"extmul_low_i8x16_u": 0xFD9E, "extmul_high_i8x16_u": 0xFD9F
+	},
+	
+	i32x4: {
+		"splat": 0xFD11,
+		"extract_lane": 0xFD1B, "replace_lane": 0xFD1C,
+		
+		"eq": 0xFD37, "ne": 0xFD38,
+		"lt_s": 0xFD39, "lt_u": 0xFD3A,
+		"gt_s": 0xFD3B, "gt_u": 0xFD3C,
+		"le_s": 0xFD3D, "le_u": 0xFD3E,
+		"ge_s": 0xFD3F, "ge_u": 0xFD40
+		
+		"extadd_pairwise_i16x8_s": 0xFD7E, "extadd_pairwise_i16x8_u": 0xFD7F
+		
+		"abs": 0xFDA0, "neg": 0xFDA1,
+		"all_true": 0xFDA3, "bitmask": 0xFDA4,
+		
+		"extend_low_i16x8_s": 0xFDA7, "extend_high_i16x8_s": 0xFDA8,
+		"extend_low_i16x8_u": 0xFDA9, "extend_high_i16x8_u": 0xFDAA,
+		"shl": 0xFDAB, "shr_s": 0xFDAC, "shr_u": 0xFDAD,
+		"add": 0xFDAE, "sub": 0xFDB1
+		"mul": 0xFDB5,
+		"min_s": 0xFDB6, "min_u": 0xFDB7,
+		"max_s": 0xFDB8, "max_u": 0xFDB9,
+		"dot_i16x8_s": 0xFDBA,
+		
+		"extmul_low_i16x8_s": 0xFDBC, "extmul_high_i16x8_s": 0xFDBD,
+		"extmul_low_i16x8_u": 0xFDBE, "extmul_high_i16x8_u": 0xFDBF,
+		
+		"trunc_sat_f32x4_s": 0xFDF8, "trunc_sat_f32x4_u": 0xFDF9
+	},
+	
+	i64x2: {
+		"splat": 0xFD12,
+		"extract_lane": 0xFD1D, "replace_lane": 0xFD1E,
+		"abs": 0xFDC0, "neg": 0xFDC1,
+		"all_true": 0xFDC3, "bitmask": 0xFDC4,
+		
+		"extend_low_i32x4_s": 0xFDC7, "extend_high_i32x4_s": 0xFDC8,
+		"extend_low_i32x4_u": 0xFDC9, "extend_high_i32x4_u": 0xFDCA,
+		
+		"shl": 0xFDCB, "shr_s": 0xFDCC, "shr_u": 0xFDCD,
+		"add": 0xFDCE, "sub": 0xFDD1,
+		"mul": 0xFDD5,
+		"eq": 0xFDD6, "ne": 0xFDD7,
+		"lt_s": 0xFDD8,
+		"gt_s": 0xFDD9,
+		"le_s": 0xFDDA,
+		"ge_s": 0xFDDB,
+		
+		"extmul_low_i32x4_s": 0xFDDC, "extmul_high_i32x4_s": 0xFDDD,
+		"extmul_low_i32x4_u": 0xFDDE, "extmul_high_i32x4_u": 0xFDDF
+	},
+	
+	f32x4: {
+		"splat": 0xFD13,
+		"extract_lane": 0xFD1F, "replace_lane": 0xFD20,
+		
+		"eq": 0xFD41, "ne": 0xFD42,
+		"lt": 0xFD43, "gt": 0xFD44,
+		"le": 0xFD45, "ge": 0xFD46,
+		
+		"demote_f64x2_zero": 0xFD5E,
+		
+		"ceil": 0xFD67, "floor": 0xFD68,
+		"trunc": 0xFD69, "nearest": 0xFD6A,
+		
+		"abs": 0xFDE0, "neg": 0xFDE1,
+		"sqrt": 0xFDE3,
+		"add": 0xFDE4, "sub": 0xFDE5,
+		"mul": 0xFDE6, "div": 0xFDE7,
+		"min": 0xFDE8, "max": 0xFDE9,
+		"pmin": 0xFDEA, "pmax": 0xFDEB,
+		
+		"convert_i32x4_s": 0xFDFA, "convert_i32x4_u": 0xFDFB
+	},
+	
+	f64x2: {
+		"splat": 0xFD14,
+		"extract_lane": 0xFD21, "replace_lane": 0xFD22,
+		
+		"eq": 0xFD47, "ne": 0xFD48,
+		"lt": 0xFD49, "gt": 0xFD4A,
+		"le": 0xFD5B, "ge": 0xFD5C,
+		
+		"promote_low_f32x4": 0xFD5F,
+		
+		"ceil": 0xFD74, "floor": 0xFD75,
+		"trunc": 0xFD7A, "nearest": 0xFD94,
+		
+		"abs": 0xFDEC, "neg": 0xFDED,
+		"sqrt": 0xFDEF,
+		
+		"add": 0xFDF0, "sub": 0xFDF1,
+		"mul": 0xFDF2, "div": 0xFDF3,
+		"min": 0xFDF4, "max": 0xFDF5,
+		"pmin": 0xFDF6, "pmax": 0xFDF7,
+		
+		"convert_low_i32x4_s": 0xFDFE, "convert_low_i32x4_u": 0xFDFF
+	}
+}

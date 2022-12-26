@@ -1,0 +1,98 @@
+/* X(name, mnem, both, type, c_op) */
+#ifdef X
+
+#ifndef X_ESP_ONLY
+	#define X_ESP_ONLY(...)
+#endif
+
+#ifndef X_misc
+	#define X_misc(...)
+#endif
+#ifndef X_oper
+	#define X_oper(...)
+#endif
+#ifndef X_bool
+	#define X_bool(...)
+#endif
+#ifndef X_bit
+	#define X_bit(...)
+#endif
+#ifndef X_object
+	#define X_object(...)
+#endif
+#ifndef X_flow
+	#define X_flow(...)
+#endif
+
+/* Miscellaneous */
+X(NOP, nop, ())
+X(MOV, mov, ())
+X(LDAR, ldar, ())
+X(STAR, star, ())
+X(CONST, const, ())
+X(GET, get, ())
+X(SET, set, ())
+X(DEL, del, ())
+
+/* Object */
+X(MKOB, mko, ())
+
+/* Control flow */
+X(SKIP, skip, ())
+X(BR, br, ())
+X(CALL, call, ())
+X(RET, ret, ())
+
+/* Arithmetic */
+X(ADD, add, (oper, both, +, 2))
+X(SUB, sub, (oper, both, -, 2))
+X(MUL, mul, (oper, both, *, 2))
+X(DIV, div, (oper, both, /, 2))
+X(MOD, mod, (oper, both, %, 2))
+X(INC, inc, (oper, both, ++, 1))
+X(DEC, dec, (oper, both, --, 1))
+X(POW, pow, (oper, esp, "**", 2))
+X(IDIV, idiv, (oper, esp, "//", 2))
+X(MOD2, mod2, (oper, esp, "%%", 2))
+
+/* Boolean */
+X(LT, lt, (bool, both, <, 2))
+X(LE, le, (bool, both, <=, 2))
+X(GT, gt, (bool, both, >, 2))
+X(GE, ge, (bool, both, >=, 2))
+X(EQ, eq, (bool, both, ==, 2))
+X(NE, ne, (bool, both, !=, 2))
+X(IDEQ, ideq, (bool, esp, "===", 2))
+X(NOT, not, (bool, both, !, 1))
+// And/or cannot be overloaded in either language so not considered ops
+X(AND, and, ())
+X(OR, or, ())
+X(IN, in, (bool, esp, "in", 2))
+X(IS, is, (bool, esp, "is", 2))
+X(AS, as, (oper, esp, "as", 2))
+
+/* Bitwise */
+X(BAND, band, (oper, both, &, 2))
+X(BOR, bor, (oper, both, |, 2))
+X(XOR, xor, (oper, both, ^, 2))
+X(INV, inv, (oper, both, ~, 1))
+X(LSH, lsh, (oper, both, <<, 2))
+X(RSH, rsh, (oper, both, >>, 2))
+X(ASH, ash, (oper, esp, ">>>", 2))
+X(LSH3, lsh3, (oper, esp, "<<<", 2))
+
+#undef X
+#undef X_misc
+#undef X_oper
+#undef X_unary
+#undef X_bool
+#undef X_bit
+#undef X_object
+#undef X_flow
+#undef X_ESP_ONLY
+
+#else
+
+#warn "opcode.def included without defining X"
+
+#endif

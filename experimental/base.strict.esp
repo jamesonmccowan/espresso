@@ -1,0 +1,575 @@
+#**
+ * This comment is to keep track of things we used to define the base in strict mode:
+ *
+ * Builtin types: i32, i64, ref, struct, function, array, cookie
+ * Builtin operators: sizeof, int[:], cast[]()
+ * Builtin objects: gc
+**#
+
+export const
+	var32 = i32, var64 = i64,
+	var = if(sizeof(int) == 4) var32 else var64,
+	heap_var = var32, live_var = var;
+
+function typename(value: var): string {
+	if(typeof(value) != object) {
+		value = value->proto;
+	}
+	return value.class.name;
+}
+
+proto GCObject is struct {
+	meta: i32;
+	body: ...i32;
+}
+
+proto Arena[SIZE: i32] is struct {
+	blocks: uintptr_t[SIZE/(sizeof(uintptr_t)*8)];
+	markmap: uintptr_t[SIZE/(sizeof(uintptr_t)*8)];
+}
+
+proto gc_object is struct {
+	meta: i32;
+	data: ...void;
+	
+	get size() = meta[:16];
+	get type() = meta[16:21];
+	get here() = meta[22];
+	get eternal() = meta[23];
+	get dirty() = meta[24];
+	get moved() = meta[25];
+	get unused() = meta[26:32];
+}
+
+for(const op, def in asm.ins.i32) {
+	const args = [], loads = [];
+	for(var name, type in zip('ab', def.args)) {
+		args.push(\(\name: \type));
+		loads.push(\(local.get \name));
+	}
+	
+	function i32.(op)(\(...args)): def.result asm {
+		\(...loads)
+		i32.\op
+	}
+}
+
+const type_prec = [i32, i64, f32, f64];
+for(var name, op in {add: "+", sub: "-", mul: "*", div: "/", mod: "%"}) {
+	for(const sti, self in ..type_prec) {
+		for(const oti, ot in ..type_prec) {
+			if(sti == oti) {
+				function self.(op)(other: ot): self {
+					self.(name)(this, other);
+				}
+			}
+			else {
+				const res = type_prec[max(sti, oti)];
+				
+				function self.(op)(other: ot): res {
+					operator.(op)(this as res, other as res);
+				}
+			}
+		}
+	}
+}
+
+proto i32 is __builtin_i32 {
+	\\ops(i32)
+	
+	bool() this != 0;
+	
+	as(type == i8) cast[i8](this & 0xff);
+	as(type == u8) cast[u8](this & 0xff);
+	as(type == i16) cast[i16](this & 0xffff);
+	as(type == u16) cast[u16](this & 0xffff);
+	as(type == i32) this;
+	as(type == u32) cast[u32](this);
+	as(type == i64) i64.extend32_s(this);
+	as(type == f32) f32.convert_i32_s(this);
+	as(type == f64) f64.convert_i32_s(this);
+	
+	+(other: i32) i32.add(this, other);
+	+(other: i64) this as i64 + other;
+	+(other: f32) this as f32 + other;
+	+(other: f64) this as f64 + other;
+	
+	-(other: i32) i32.sub(this, other);
+	-(other: i64) this as i64 - other;
+	-(other: f32) this as f32 - other;
+	-(other: f64) this as f64 - other;
+	
+	*(other: i32) i32.mul(this, other);
+	*(other: i64) this as i64 * other;
+	*(other: f32) this as f32 * other;
+	*(other: f64) this as f64 * other;
+	
+	/(other: i32|u32|f32) this as f32 / other;
+	/(other: i64|u64|f64) this as f64 / other;
+	
+	%(other: i32) i32.rem_s(this, other);
+	%(other: i64) this as i64 % other;
+	%(other: f32) this - f32.trunc(this / other) * other;
+	%(other: f64) this - f64.trunc(this / other) * other;
+	
+	**(other: i32) i32_pow(this, other);
+	**(other: i64) i64_pow(this as i64, other);
+	**(other: f32) f32_pow(this as f32, other);
+	**(other: f64) f64_pow(this as f64, other);
+	
+	&(other: i32) i32.and(this, other);
+	&(other: i64) this as i64 & other;
+	
+	|(other: i32) i32.or(this, other);
+	|(other: i64) this as i64 | other;
+	
+	^(other: i32) i32.xor(this, other);
+	^(other: i64) this as i64 ^ other;
+	
+	~(this) i32.xor(this, -1);
+	-(this) i32.sub(0, this);
+	
+	<<(other: i32) i32.lsh(this, other);
+	<<(other: i64) this as i64 << other;
+	<<(other: f32|f64) this * 2**other;
+	
+	>>(other: i32) i32.shr_s(this, other);
+	>>(other: i64) this as i64 >> other;
+	>>(other: f32|f64) this / 2**other;
+	
+	>>>(other: i32) i32.shr_u(this, other);
+	>>>(other: i64) this as i64 >>> other;
+	>>>(other: f32|f64) this as u32 >>> other;
+	
+	<<>(other: i32) i32.rotl(this, other);
+	<<>(other: i64) this as i64 <<> other;
+	<<>(other: f32|f64) (this as u32 << other)%i32.MAX as i32;
+	
+	<>>(other: i32) i32.rotr(this, other);
+	<>>(other: i64) this as i64 <>> other;
+	<>>(other: f32|f64) fail "NotImplemented";
+	
+	==(other: i32) i32.eq(this, other);
+	==(other: i64) this as i64 == other;
+	==(other: f32) this as f32 == other;
+	==(other: f64) this as f64 == other;
+	
+	!=(other: i32) i32.ne(this, other);
+	!=(other: i64) this as i64 != other;
+	!=(other: f32) this as f32 != other;
+	!=(other: f64) this as f64 != other;
+	
+	<(other: i32) i32.lt(this, other);
+	<(other: i64) this as i64 < other;
+	<(other: f32) this as f32 < other;
+	<(other: f64) this as f64 < other;
+	
+	<=(other: i32) i32.le(this, other);
+	<=(other: i64) this as i64 <= other;
+	<=(other: f32) this as f32 <= other;
+	<=(other: f64) this as f64 <= other;
+	
+	>(other: i32) i32.gt(this, other);
+	>(other: i64) this as i64 > other;
+	>(other: f32) this as f32 > other;
+	>(other: f64) this as f64 > other;
+	
+	>=(other: i32) i32.ge(this, other);
+	>=(other: i64) this as i64 >= other;
+	>=(other: f32) this as f32 >= other;
+	>=(other: f64) this as f64 >= other;
+}
+
+proto espfunc is struct {
+	call: ref[function];
+	debug: cookie;
+	upvars: array[var];
+	
+	new(call: function, upvars: array[var], debug: cookie) {
+		var this = gc.alloc(gc_type_espfunc, sizeof(espfunc));
+		
+		this.init(call, upvars, debug);
+		
+		return this;
+	}
+	
+	init(call, upvars, debug) {
+		this.call = call;
+		this.upvars = upvars;
+		this.debug = debug;
+	}
+}
+
+function +(lhs: int, rhs: float) {
+	typeof(.) == bool
+}
++.overload = {
+	(int, float): __fn1
+}
+
+export function __builtin_typeof(this: var): var {
+	if(sizeof(var) == 4) {
+		if(this == 0) typeof_none;
+		else if(this[0]) typeof_int;
+		else if(this[:2]) {
+			switch(this[2:5]) {
+				case 0:
+				case 1 => typeof_bool;
+				case 2 => typeof_delete;
+				case 3 => typeof_char;
+				case 4 => typeof_intern;
+				case 5 => typeof_cookie;
+				
+				default: fail "Invalid variant";
+			}
+		}
+		else typeof_object;
+	}
+	else {
+		if(this == 0) typeof_none;
+		else if(this[-1]) typeof_int;
+		else if(this[-13:]) typeof_float;
+		else {
+			switch(this[49:52]) {
+				case 0 =>
+					switch(this.raw[:2]) {
+						case 0 => typeof_none;
+						case 1 => typeof_delete;
+						case 2:
+						case 3 => typeof_bool;
+						
+						default: fail "Invalid variant";
+					}
+				case 1 .. 7: #* bla *#
+			}
+		}
+	}
+}
+
+export function __builtin_get(this: var, name: var, default: var = none): var {
+	switch(__builtin_typeof(this)) {
+		case typeof_none => none;
+		
+		default:
+			this = __builtin_proto(this);
+			# fallthrough #
+		
+		case typeof_object =>
+			__builtin_object_get(this, name, default);
+	}
+}
+
+export function __builtin_call(this: var, ...args: ...var): var {
+	switch(__builtin_typeof(this)) {
+		case typeof_rawfunc => this(...args);
+		case typeof_espfunc =>
+			cast[ref[espfunc]](unpack_ref(this)).call(...args);
+		
+		default:
+			this = __builtin_proto(this);
+			# fallthrough #
+		
+		case typeof_object =>
+			__builtin_call(__builtin_object_get(this, "call"), ...args);
+	}
+}
+
+namespace gc {
+	proto Header is struct {
+		metadata: u32;
+		
+		here(): bool {
+			this.metadata & 1;
+		}
+		size(): int {
+			this.metadata >> 16;
+		}
+	};
+	
+	proto Object is Header {
+		
+	}
+}
+
+#**
+ * Values in the heap are always 32 bits. On 64-bit platforms they use
+ *  object-relative addressing (ie abs = &ptr + ptr) and are otherwise the
+ *  same as 32-bit platform values.
+ * 
+ * xxxx1 = smi
+ * xxx00 = GCObject* (NULL = none)
+ * 00100 = empty
+ * 01000 = false
+ * 01100 = true
+ * xxx10 = const char*
+ * 
+ *   0
+ *    0010 = false (2)
+ *    0110 = true (6)
+ *    1010 = empty (10)
+ *    1110 = char (14) (utf-32 encoding, only 21 bits used)
+ *   1
+ *    0010 = intern
+ *    0110 = symbol
+ *    1010 = cstring
+ *    1110 = 
+**#
+proto Value32 is struct {
+	private raw: u32;
+	
+	typeof(): int {
+		if(this.raw & 1) typeof_int;
+		else if(this.raw & 3) {
+			switch((this.raw >> 2) & 7) {
+				case 0:
+				case 1 => typeof_bool;
+				case 2 => typeof_delete;
+				case 3 => typeof_char;
+				case 4 => typeof_intern;
+				case 5 => typeof_cookie;
+				
+				default: typeof_invalid;
+			}
+		}
+		else typeof_object;
+	}
+	
+	as_bool(): bool {
+		assert(this.typeof() == typeof_bool);
+		return this.raw != 2;
+	}
+	
+	as_float(): float {
+		assert(this.typeof() == typeof_float);
+		return cast[ref[gc_float]](this.unpack_ptr()).value;
+	}
+	
+	as_smi(): int {
+		assert(this.typeof() == typeof_int);
+		return int(this.raw >> 1);
+	}
+	
+	as_char(): char {
+		assert(this.typeof() == typeof_char);
+		return char(this.raw >> 5);
+	}
+}
+
+#**
+ * "Live" value type for on-stack manipulation which is as big as the
+ *  platform's word. Unlike HeapValue, pointers use absolute addressing.
+ *  On 64-bit platforms, a variant of NaN tagging is used. Doubles are encoded
+ *  by inverting their bits. Integers are signed inverted signalling NaNs
+ *  with 51 bits of significant digits. Other values are encoded as unsigned
+ *  inverted signalling NaNs. The high 4 bits of the 52 bit payload is used
+ *  as a type tag, the lower 48 bits are the actual value. This was chosen as
+ *  it's enough to cover most in-practice addressing for pointers.
+ * 
+ * Inverting the bits of double was chosen because pointers have higher
+ *  utility unencoded, and this way non-double is an easy boolean check of
+ *  the 12 bits after the sign bit (signalling NaN would be all 1s, so
+ *  inverted it's all 0s unless it's double)
+ * 
+ * Special values none, empty, false, and true have the same integer value
+ *  as in HeapValue, which is achieved by taking advantage of the LS 3 bits
+ *  which are normally 0 for alignment. The bit pattern of none was carefully
+ *  chosen to be equivalent to NULL, which aids in quick checks.
+ * 
+ * Pointers are designed to have minimal overhead. Provided they're normal/
+ *  native pointers, they can be dereferenced directly. Other pointer types
+ *  are included for bare host pointers to avoid heap allocation.
+ * 
+ * The semantics of the different types is different interpretations of the 
+ *  bits, so GC objects (which must contain their own metadata to enable
+ *  walking the GC liveness graph) aren't enumerated.
+ * 
+ * Different heap arena types:
+ *  - bytes table, simple bump allocator with no deallocations
+ *  - arena managed by quipu
+ *  - binary heap allocation to optimize realloc
+ *  - big objects use malloc
+ * 
+ * Ok we actually have a good restriction for where type data can reside:
+ *  HeapValue can't store type information for the most part, so we know
+ *  for a fact that types unrepresented by it must have a presence in the
+ *  GCObject header
+ * 
+ * For reference:
+ * 
+ * s xxxf ffff ffff ffff
+ * 
+ * union Value {
+ *   uintptr_t base;
+ *   
+ *   struct ieee_binary64 { // bits inverted
+ *     bool sign : 1;
+ *     uint exp : 11;
+ *     uint frac : 52;
+ *   };
+ *   
+ *   struct int51 {
+ *     bool sign : 1 = 1;
+ *     uint head : 12 = 0; // MSB of frac must be zero to be a signaling NaN
+ *     uint value : 51;
+ *   };
+ *   
+ *   struct other {
+ *     uint head : 13 = 0;
+ *     uint tag : 3;
+ *     byte payload[] : 48;
+ *   };
+ * 
+ *   // 000 = simple/GCOject
+ *       simple =
+ *        000 none (NULL pointer, otherwise GCObject)
+ *        001 delete
+ *        010 false
+ *        011 true
+ *        100 
+ *        101 
+ *        110 
+ *        111 
+ * 
+ *   // 001 = cstring
+ *   // 010 = opaque
+ *   // 010 = espfunc
+ *   // 011 = char
+ *   // 100 = intern
+ *   // 101 = cookie
+ *   // 110 = 
+ *   // 111 = 
+ * };
+**#
+
+proto Value64 is struct {
+	private raw: u64;
+	
+	typeof(): int {
+		if(this.raw >> (64 - 13) == 1<<12) {
+			return typeof_int;
+		}
+		
+		if(~(-1>>13) & this.raw) {
+			return typeof_float;
+		}
+		
+		switch(this.raw >> 48) {
+			case 0 =>
+				switch(this.raw & 7) {
+					case 0 => typeof_none;
+					case 1 => typeof_delete;
+					case 2:
+					case 3 => typeof_bool;
+					
+					default: typeof_invalid;
+				}
+			case 1 .. 7: #* bla *#
+		}
+	}
+	
+	bool() {
+		assert(this.typeof() == typeof_bool);
+		return this != 2;
+	}
+	
+	float() {
+		assert(this.typeof() == typeof_float);
+		return bit_cast[float](~this.raw);
+	}
+	
+	smi(): int {
+		assert(this.typeof() == typeof_smi);
+		return this.raw & (1<<52 - 1);
+	}
+	
+	char() {
+		assert(this.typeof() == typeof_char);
+		return char(this.raw & (1<<21 - 1));
+	}
+	
+	has(name: Value): bool {
+		if(typeof(this) == object) {
+			this->object.has(name);
+		}
+		else {
+			this->object.proto(this).has(name);
+		}
+	}
+	
+	call(...args: Value[]): Value {
+		if(typeof(this) == \function) {
+			this->cast[ref[function]](this.unpack_ptr()).impl(...args);
+		}
+		else if(this->has("call")) {
+			this.call(...args);
+		}
+	}
+}
+
+proto Function is struct {
+	debug: cookie;
+	impl: function[Value, Value, ...Value];
+	
+	nupv: u8;
+	upvars: Value[];
+}
+
+proto bool is enum { false, true }
+
+proto option[T] is enum {
+	some(T), none
+}
+let none = option.none;
+let some[T](x: T): T {
+	if(x is not none)
+		yield if(let option[T].some(y) = x) y else x;
+	return false;
+}
+
+fn in[L, R](lhs: L, this: R): bool {
+	let rp = rhs.prototype();
+	if(rp has "in") {
+		rhs->rp.in(rhs);
+	}
+	else if(rp has "iter") {
+		rhs.iter().map(. == el).any();
+	}
+	else panic("No implementation for \{L} `in` \{R}");
+}
+
+fn fix_tvars(T, meta) {
+	T.unique().flatMap(x => {
+		if(x is type[meta]) {
+			yield ...x.members;
+		}
+		else yield x;
+	}).collect[set[type]]();
+}
+
+#**
+ * Union metatype axioms:
+ * 
+ * union[union[T, U], V] = union[T, U, V]
+ * union[T] = T
+ * union[T, T, U] = union[T, U]
+ * union[T, U] = union[U, T]
+ * union[...T, none] = optional[union[...T]]
+**#
+proto[...T] type union {
+	let members = fix_tvars();
+	
+	fn iter() => yield ...this.members;
+}
+fn is[T, ...U](lhs: T, rhs: type[union[...U]]) => T in U;
+fn as[T, ...U](lhs: T, rhs: type[union[...U]]) {
+	if(T in U) some(x) else none
+}
+
+proto[...T] type intersect {
+	let members = fix_tvars();
+	
+	fn iter() => yield ...this.members;
+}
+fn is[T, ...U](lhs: T, rhs: type[intersect[...U]]): bool {
+	rhs.map(x => lhs is x).all();
+}

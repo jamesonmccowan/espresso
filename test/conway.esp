@@ -1,0 +1,74 @@
+#*
+ * Conway's game of life
+ *
+ * Tests:
+ *  - prototyping
+ *  - metaobject model
+ *  - chained comparisons
+ *  - parameter unpacking
+ *  - getter/setter overloading
+ *#
+ 
+proto Game is class {
+	init(width, height) {
+		this.width = width;
+		this.height = height;
+		this.data = [...for(height) [false]*width)];
+	}
+	
+	get([x, y]) {
+		if(0 <= x < this.width and 0 <= y <= this.height) {
+			this.data[x][y];
+		}
+		else 0;
+	}
+	set([x, y], value) {
+		if(0 <= x < this.width and 0 <= y <= this.height) {
+			this.data[x][y] = value;
+		}
+	}
+	
+	static fromstring(game) {
+		var lines = game.split('\n');
+		var g = new Game(lines[0].length, lines.length);
+		
+		for(var [y, line] in zip(..lines, lines)) {
+			for(var [x, c] in zip(..line, line)) {
+				g[x, y] = (c != ' ');
+			}
+		}
+		
+		return g;
+	}
+}
+
+function next(g) {
+	var {width: gw, height: gh} = g;
+	var g2 = new Game(gw, gh);
+	
+	for(var x in ..gw) {
+		for(var y in ..gh) {
+			var neighbors =
+				g[x - 1, y - 1] + g[x, y - 1] + g[x + 1, y - 1] +
+				g[x - 1, y    ]               + g[x + 1, y    ] +
+				g[x - 1, y + 1] + g[x, y + 1] + g[x + 1, y + 1];
+			
+			g[x, y] = not g[x, y] and neighbors == 2 or neighbors == 3;
+		}
+	}
+	
+	return g2;
+}
+
+var game = Game.fromstring("""
+	xx  xx x x xxx x
+	xxxx xxx x x x x
+	 x x x x xxx x x
+	 x x x xxx x x  
+	x xx xxxx xx x x
+""");
+
+loop {
+	print('\x1b[2J' + game);
+	game = next(game);
+}

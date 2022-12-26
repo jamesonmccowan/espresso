@@ -1,0 +1,53 @@
+Crema is the name for the restricted subset of Espresso used to bootstrap the Espresso compiler. Its name derives from the name of the foam on top of espresso, because "it's made of the same stuff but there's not much there". Espresso has a lot of advanced features and syntax sugar to clarify intent, and as such most of that isn't needed for a first pass.
+
+Crema should be a strict subset.
+
+== Literals ==
+Crema supports decimal and hex integers, string literals, and (restricted) template string literals which cannot contain nested template strings with the same quote type. 
+
+It's probably easier to define Crema by what it doesn't support than by what it does
+* No triply-quoted strings
+* No template strings
+* Decimal and hexadecimal integers only - no binary or octal
+* No float literals whatsoever
+* Var only, no const (no point in keeping track of the semantics)
+* There is no autoreturn, so every value must be returned explicitly. Reaching the end of the function block will still return none.
+* No proto, just object literals.
+* No getters/setters or access specifiers
+* No explicit this parameter
+* No annotations whatsoever
+* No then-else for applicable blocks
+* No try blocks
+* No inline loops or inline if-else
+* No structural decomposition
+* No operators := ++ -- ! ? -> :: @ ~ & | ^ << >> >>> <<> <>> && || ^^ <=> .. ... * / % ** // %% === !== <: :>
+* No operator overloading
+* No after operator
+* No var statements in expressions
+* No arrow functions
+* No non-trivial function arguments (rest followed by positional)
+* No named function arguments
+* No object suffix calls
+* No string prefix calls
+* No array slicing
+* No closures (other than in global scope)
+* No boolean operator chaining
+* No "not in/is" meta-operator
+* Empty list elements are invalid (eg [,,] == [none, none])
+* No rest arguments or spreads
+* No generator functions
+
+Things which are supported:
+* loop, while, and for
+* if, else
+* Operators + - < <= > >= == != ?? and or not in is
+* = and compound assignment operators
+* List and object literals
+* Object method syntax
+* Function default arguments
+* Item get/set operators
+* Assignment as expression
+* Implicit semicolons
+* Unassigned variables are none
+* Variable declarations can be any statement
+* New operator with prototype semantics

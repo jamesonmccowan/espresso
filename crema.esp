@@ -1,0 +1,440 @@
+var re = import("re");
+
+var
+	PATS = {
+		punc: `[\(\)\[\]\{\}]|\.(?!\.)|\.{3}|[,;:]|=>`,
+		cmp: `[<>!=]=|[<>!]`,
+		op: `[-+=]`,
+		dec: `\d+`,
+		sq: `'((?:\\.|.+?)*?)'`, dq: `"((?:\\.|.+?)*?)"`, bq: `\`((?:\\.|.+?)*?)\``,
+		id: `[\w][\w\d]*`,
+	},
+	EVEN_SLASH = re.compile(`\\{2}`),
+	RE_CLASS = re.compile(`(?<!\\)\[(?:\\.|[^\]]+?)*\\]`),
+	RE_GROUP = re.compile(`(?<!\\)\((?!\?(?!P<))`),
+	TOKEN = re.compile("(" + ")|(".join(PATS.values()) + ")", re.M),
+	COMMENT = re.compile(`\s*(#\*(?:.|\n)*?\*#\s*|#\{|#.*$)`, re.M),
+	NEWLINE = re.compile(`\n`),
+	SPACE = re.compile(`\s+`, re.M);
+
+var
+	NAMES = list(PATS.keys()),
+	PRECS = {
+		# Weakest binding
+		";": 0,
+		",": 1, "=": 2,
+		"after": 3,
+		"or": 4, "and": 6,
+		"in": 10, "is": 10,
+		"==": 11, "!=": 11,
+		"<": 12, "<=": 12, ">": 12, ">=": 12,
+		"not": 13, "~": 14, "+": 15, "-": 15,
+		".": 17
+		# Strongest binding
+	},
+	RIGHT = ["**"],
+	KWOP = ["in", "is", "and", "or", "not", "after"];
+
+var TG = {}, index = 0;
+for(var name in PATS.keys()) {
+	var pat = RE_CLASS.sub("", EVEN_SLASH.sub("", PATS[name]));
+	var count = list(RE_GROUP.findall(pat)).length;
+	var i = 0;
+	loop {
+		index = index + 1;
+		TG[index] = [name, count];
+		i = i + 1;
+	} while(i <= count);
+}
+
+var stresc(s) {
+	s.replace("\\r", "\r").replace("\\n", "\n").replace("\\t", "\t");
+}
+
+var ineq(value, desc) {
+	if(desc is list) {
+		value in desc;
+	}
+	else desc is none or value == desc;
+}
+
+var Context(pos, line, col) {
+	return {pos, line, col};
+}
+
+var Token(type, match, ctx) {
+	return {type, match, ctx, value: match[0]};
+}
+
+var AST(op, args) {
+	return {op, args, token,
+		json() {
+			var out = [this.op];
+			for(var arg in this.args) {
+				if(arg is AST) {
+					out.push(arg.json());
+				}
+				else out.push(arg);
+			}
+			
+			if(this.token) {
+				['line', this.token.ctx.line, out];
+			}
+			else out;
+		},
+		
+		origin(tok) {
+			this.token = tok;
+			return this;
+		}
+	};
+}
+
+var SPECIAL = {
+	"("(this, lhs, min_prec) {
+		lhs =
+			if(lhs is none) this.semi();
+			else {
+				var rhs = [];
+				while(var val = this.expr()) {
+					rhs.push(val);
+					if(not this.maybe(",")) break;
+				}
+				AST("call", [lhs, rhs]);
+			}
+		
+		this.expect(")");
+		return lhs;
+	},
+	"["(this, lhs, min_prec) {
+		lhs =
+			if(lhs is none) {
+				var vals = [];
+				while(var val = this.expr(PRECS[','])) {
+					vals.push(val);
+					
+					if(not this.maybe(",")) break;
+				}
+				this.expect("]");
+				
+				AST('list', [vals]);
+			}
+			else AST("[]", [lhs, this.expr()]);
+		
+		this.expect(']');
+		return lhs;
+	},
+	"{"(this, lhs, min_prec) {
+		if(lhs is none) {
+			var entries = [];
+			while(var nt = this.peek()) {
+				var name = this.relaxid();
+				var vn = AST('id', [name]);
+				
+				var value =
+					if(this.peek("(")) {
+						var args = this.funcargs();
+						var body = this.block();
+						AST('fn', [AST("const", [name]), args, body]);
+					}
+					else if(this.maybe(":")) this.expr(PRECS[',']);
+					else vn;
+				
+				entries.push([vn, value]);
+				
+				this.maybe(",");
+			}
+			else fail "Not implemented: Block call";
+			
+			AST('object', entries);
+		}
+		
+		this.expect("}");
+		return lhs;
+	},
+	"."(this, lhs, min_prec) {
+		AST(".", lhs, AST("const", [this.relaxid()]));
+	},
+	","(this, lhs, min_prec) {
+		var elems = [lhs];
+		loop {
+			elems.push(this.expr(PRECS[',']));
+		} while(this.maybe(","));
+		
+		AST(",", lhs)
+	}
+}
+
+var KW = {
+	if(this) {
+		var
+			cond = this.condition(),
+			th = this.block(),
+			el = if(this.maybe("else")) this.block() else none;
+		
+		AST('if', [cond, th, el]);
+	},
+	loop(this) {
+		var always = this.block();
+		if(this.maybe("while")) {
+			AST('loop', [always, this.condition(), this.block()]);
+		}
+		else AST('loop', [always])
+	},
+	while(this) {
+		AST('loop', [this.condition(), this.block()]);
+	},
+	for(this) {
+		this.expect("(");
+		this.expect("var");
+		
+		var itvt = this.peek();
+		var itvar = AST("id", [this.relaxid()]);
+		this.expect("in");
+		
+		var iter = this.expr(PRECS[',']);
+		this.expect(")");
+		
+		AST('for', [itvar, iter, this.block()]);
+	},
+	return(this) AST("return", this.expr(0));
+	fail(this) AST("fail", this.expr(0));
+	var(this) {
+		var vars = [];
+		loop {
+			var nt = this.peek();
+			var name = this.relaxid(), value;
+			name = AST("id", name);
+			
+			if(this.maybe("=")) {
+				value = this.expr(0);
+			}
+			
+			vars.push([name, value]);
+		} while(this.maybe(","));
+		
+		AST('var', vars);
+	}
+}
+
+var Parser = {
+	init(src) {
+		this.src = src;
+		this.ctx = Context(0, 1, 1);
+		this.cur = none;
+		this.consume();
+	},
+	
+	##############
+	### Lexing ###
+	##############
+	
+	repos(m) {
+		if(m is none) return;
+		
+		var
+			old = this.ctx,
+			l = old.line,
+			c = old.col,
+			p = old.pos + m[0].length;
+		
+		var lines = NEWLINE.split(m[0]);
+		if(lines.length > 1) {
+			l = l + lines.length - 1;
+			c = lines[-1].length;
+		}
+		else c = c + m[0].length;
+		
+		this.ctx = Context(p, l, c);
+		return old;
+	},
+	
+	error(msg) return {"typename": "Error", msg, "ctx": this.ctx};
+	match(reg) reg.match(this.src, this.ctx.pos);
+	
+	next() {
+		var m, type;
+		while(m = this.match(COMMENT)) {
+			this.repos(m);
+		}
+		this.repos(this.match(SPACE));
+		
+		m = this.match(TOKEN);
+		if(m is none) return none;
+		
+		if(m[0] in KW) type = "kw";
+		else if(m[0] in KWOP) type = "op";
+		else {
+			var tt_gc = TG[m.lastindex];
+			if(tt_gc is none) fail "Invalid regex group " + m.lastindex;
+			
+			m = m.groups()[slice(m.lastindex - 1, m.lastindex + tt_gc[1])];
+			type = tt_gc[0];
+		}
+		
+		Token(type, m, this.repos(m));
+	},
+	
+	consume() return this.cur = this.next();
+	
+	#######################
+	### Generic parsing ###
+	#######################
+	
+	peek(value, type) {
+		var cur = this.cur;
+		if(cur and ineq(cur.value, value) and ineq(cur.type, type)) {
+			return cur;
+		}
+	},
+	maybe(value, type) {
+		var tok = this.peek(value, type);
+		if(tok) this.consume();
+		return tok;
+	},
+	expect(value, type) {
+		if(var tok = this.maybe(value, type)) return tok;
+		
+		var tok = this.peek();
+		fail this.error("Expected " + (value or type) + ", got " + tok.type + ":" + tok.value);
+	},
+	
+	expected(what) {
+		this.error("Expected " + what + ", got " + this.peek());
+	},
+	
+	parse() AST("progn", this.semi());
+	
+	###############
+	### Clauses ###
+	###############
+	
+	condition() {
+		if(this.maybe("(")) {
+			var ex = this.expr(0);
+			this.expect(")");
+			return ex;
+		}
+		else this.expr(0);
+	},
+	
+	funcargs() {
+		this.expect("(");
+		var args = [];
+		loop {
+			args.push(this.atom());
+		} while(this.maybe(","));
+		this.expect(")");
+		
+		return args;
+	},
+	
+	relaxid() {
+		var tok = this.maybe(none, ["id", "kw", "op", "cmp", "assign"]);
+		if(tok) tok.value;
+		else if(tok = this.maybe(none, ['sq', 'dq', 'bq'])) tok.match[1];
+	},
+	ident() {
+		if(var tok = this.maybe(none, "id")) tok.value;
+	},
+	
+	block() {
+		var x, tok;
+		if(tok = this.maybe("{")) {
+			x = this.semi();
+			this.expect("}");
+			x.origin(tok);
+		}
+		else {
+			x = this.expr(0);
+			this.maybe(";");
+		}
+		return x;
+	},
+	
+	#########################
+	### Special-operators ###
+	#########################
+	
+	semi() {
+		var ls = [];
+		loop {
+			while(this.maybe(";")) {}
+		}
+		while(var val = this.expr(0)) {
+			ls.push(val);
+		}
+		
+		if(ls.length == 1) ls[0];
+		else AST('block', ls);
+	},
+	
+	######################
+	### Normal parsing ###
+	######################
+	
+	expr(min_prec) {
+		var lhs = this.atom();
+		
+		while(var tok = this.peek()) {
+			var op = tok.value;
+			if(op == ";") break;
+			
+			var prec = PRECS[op];
+			if(prec is none or prec < min_prec) break;
+			
+			this.consume();
+			
+			lhs =
+				if(op in SPECIAL) SPECIAL[op](lhs, tok);
+				else {
+					var rhs = this.expr(prec + not (op in RIGHT));
+					if(rhs is none) break;
+					AST(op, lhs, rhs);
+				}
+			
+			lhs.origin(tok);
+		}
+		
+		return lhs;
+	},
+	
+	#**
+	 * Lexical units which function as single ast nodes with no need for
+	 *  scanning ahead.
+	**#
+	atom() {
+		var cur = this.peek();
+		if(cur is none) return;
+		
+		var val = cur.value, ct = cur.type;
+		
+		# Tokens which signal non-atom
+		if(val in [")", "]", "}", ',', ";", "else"]) {
+			return none;
+		}
+		
+		this.consume();
+		
+		var result =
+			if(ct == "dec") AST("const", int(val, 10));
+			else if(ct in ['sq', 'dq']) AST("const", stresc(cur.match[1]));
+			else if(ct == "bq") AST("const", cur.match[1]);
+			else if(ct == "id") AST("id", val);
+			else if(ct == "kw") KW[val](this);
+			else {
+				fail this.error("Unknown token " + ct + " = " + val);
+			}
+		
+		result.origin(cur);
+	}
+}
+
+var json = import("json");
+
+var f = open(argv[0]);
+var p = Parser.init(f.read());
+f.close();
+var ast = p.parse();
+print(ast);
+print(json.dumps(ast.json()));

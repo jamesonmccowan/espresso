@@ -1,0 +1,50 @@
+export function call(this, self, ...args) {
+	return self->this(...args);
+}
+
+export function apply(this, self, args) {
+	return self->this(...args);
+}
+
+export function curry(this, ...args) {
+	const fn = this;
+	
+	return function [this.name](...inner_args) {
+		fn(...)
+	}
+}
+
+export function void(this) {
+	const fn = this;
+	return function [this.name](...args) {
+		fn(...args);
+		return none;
+	}
+}
+
+const null = symbol("null");
+
+@method
+function get(this: null, key) {
+	fail new NullError("index");
+}
+
+@method
+function set(this: null, key, val) {
+	fail new NullError("assign")
+}
+
+@method
+function delete(this: null, key) {
+	fail new NullError("delete")
+}
+
+@method
+function is(other === null) {
+	return this === null;
+}
+
+@method
+function nullish(x === null) {
+	return true;
+}

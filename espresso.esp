@@ -1,0 +1,512 @@
+import re;
+
+const
+	PATS = {
+		"dec": `\d+`,
+		"sq": `'(?:\\.|.+?)*?'`, "dq": `"(?:\\.|.+?)*?"`, "bq": `\`(?:\\.|.+?)*?\``,
+		"id": `[\w][\w\d]*`,
+		"punc": `[\(\)\[\]\{\}]|\.(?!\.)|\.{3}|[,;:]`,
+		"cmp": `[<>!=]=|[<>!]`,
+		"op": `[-+=]`
+	},
+	EVEN_SLASH = re`\\{2}`,
+	RE_CLASS = re`(?<!\\)\[(?:\\.|[^\[]+)*\\]`,
+	RE_GROUP = re`(?<!\\)\((?!\?(?!P<))`,
+	TOKEN = re("(" + PATS.values().join(")|(") + ")", 'm'),
+	COMMENT = re`\s*(#\*(?:.|\n)+?\*#\s*|#\{|#.*$)`m,
+	NEWLINE = re`\n`,
+	SPACE = re`\s+`m;
+
+const
+	NAMES = list(PATS.keys()),
+	PRECS = {
+		# Weakest binding
+		";": 0,
+		",": 1, "=": 2,
+		"after": 3,
+		"or": 4, "and": 6,
+		"in": 10, "is": 10,
+		"==": 11, "!=": 11,
+		"<": 12, "<=": 12, ">": 12, ">=": 12,
+		"not": 13, "~": 14, "+": 15,
+		".": 17
+		# Strongest binding
+	},
+	RIGHT = ["**"],
+	KW = [
+		"function", "var",
+		"if", "else", "loop", "while", "for",
+		"switch", "case", "default", "return", "fail", "break", "continue"
+	],
+	KWOP = ["in", "is", "and", "or", "after", "has"];
+
+const TG = {};
+var index = 0
+for(var name in PATS.keys()) {
+	var pat = RE_CLASS.replace("", EVEN_SLASH.replace("", PATS[name]));
+	var count = list(RE_GROUP.findall(pat)).length;
+	var index = 0;
+	while(index < count) {
+		TG[++index] = [name, count];
+	}
+}
+
+function stresc(s) {
+	s.replace("\\r", "\r").replace("\\n", "\n").replace("\\t", "\t");
+}
+
+proto Context {
+	init(pos, line, col) {
+		this := {pos, line, col};
+	}
+}
+
+proto ParseError is Error {
+	ctx: Context;
+}
+
+proto Token {
+	init(match, type, ctx) {
+		this.value = match[0];
+		this := {match, type, ctx};
+	}
+}
+
+proto AST is struct {}
+proto Op is AST {
+	op: string;
+	lhs: AST;
+	rhs: AST;
+}
+proto Call is AST {
+	fn: AST;
+	args: ...AST;
+}
+proto Const is AST {
+	value: var;
+}
+proto Ident is AST {
+	name: string;
+}
+proto Literal is AST {
+	elems: list[var];
+}
+proto TupleLiteral is Literal {}
+proto ListLiteral is Literal {}
+proto ObjectLiteral is Literal {}
+
+proto Block is AST {
+	stmts: list[AST];
+}
+proto Branch is AST {
+	kind: string;
+	value: AST;
+}
+
+proto If is AST {
+	cond: AST;
+	th: AST;
+	el: AST?;
+}
+
+proto Loop is AST {
+	always: AST?;
+	cond: AST?;
+	body: AST?;
+	th: AST?;
+	el: AST?;
+}
+
+proto ForLoop is AST {
+	decl: bool;
+	itvar: Decl;
+	iter: AST;
+	body: AST;
+	th: AST?;
+	el: AST?;
+}
+
+proto Case is AST {
+	op: string;
+	value: AST?;
+	body: AST;
+	fallthrough: bool;
+}
+proto Switch is AST {
+	cond: AST;
+	cases: list[Case];
+	th: AST?;
+	el: AST?;
+}
+
+const Decl = .lvalue;
+proto Var is AST {
+	decls: list[Decl];
+}
+
+proto Arg is AST {
+	name: Decl;
+	type: AST;
+	value: AST?;
+}
+proto Func is AST {
+	name: AST?;
+	args: list[Arg];
+	ret: AST?;
+	body: AST;
+}
+
+proto Parser {
+	init(src) {
+		this.src = src;
+		this.ctx = new Context(0, 1, 1);
+		this.cur = none;
+		this.consume();
+	}
+	
+	##############
+	### Lexing ###
+	##############
+	
+	#**
+	 * Reposition the parser based on the token match and return the old
+	 *  context.
+	**#
+	repos(m) {
+		if(m is none) return;
+		
+		var
+			old = this.ctx,
+			l = old.line,
+			c = old.col,
+			p = old.pos + m[0].length,
+			lines = NEWLINE.split(m[0]);
+		
+		if(lines.length > 1) {
+			l += lines.length - 1;
+			c = lines[-1].length;
+		}
+		else c += m[0].length;
+		
+		this.ctx = new Context(p, l, c);
+		return old;
+	}
+	
+	error(msg) return new ParseError(msg, this.ctx);
+	match(reg) reg.match(this.src, this.ctx.pos);
+	
+	next() {
+		var m, type;
+		while(m = this.match(COMMENT)) {
+			this.repos(this, m);
+		}
+		this.repos(this.match(SPACE));
+		
+		m = this.match(TOKEN);
+		if(m is none) return none;
+		
+		if(m[0] in KW) type = "kw";
+		else if(m[0] in OPKW) type = "op";
+		else {
+			var tt_gc = TG[m.lastindex];
+			if(tt_gc is none) fail "Invalid regex group " + m.lastindex;
+			
+			type, var gc = tt_gc;
+			m = m.groups().slice(m.lastindex - 1, m.lastindex + gc);
+		}
+		
+		return new Token(m, type, this.repos(m));
+	}
+	
+	#######################
+	### Generic parsing ###
+	#######################
+	
+	consume() return this.cur = this.next();
+	peek(value, type) {
+		function ineq(value, desc) {
+			if(desc is list) value in desc;
+			else desc is none or value == desc;
+		}
+		
+		var cur = this.cur;
+		if(cur and ineq(cur.value, value) and ineq(cur.type, type)) {
+			return cur;
+		}
+	}
+	maybe(value, type) this.peek(value, type) after? this.consume();
+	expect(value, type) {
+		return? this.peek(value, type) after? this.consume();
+		fail this.error("Expected " + (value or type));
+	}
+	
+	########################
+	### Espresso parsing ###
+	########################
+	
+	relaxid() {
+		if(var tok = this.maybe(type:["id", "kw", "op", "cmp", "assign"])) {
+			new Ident(tok.value);
+		}
+	}
+	ident() {
+		if(var tok = this.maybe(none, ["id"])) {
+			['id', tok.value];
+		}
+	}
+	
+	#**
+	 * Conditions surrounded by parentheses need special parsing to ensure
+	 *  the expression doesn't continue on after the closing paren.
+	**#
+	condition() {
+		if(this.maybe("(")) {
+			return this.semi() after this.expect(")");
+		}
+		else ...this.expr(0);
+	}
+	
+	funcargs() {
+		this.expect("(");
+		var args = [], d = false;
+		while(var name = this.ident()) {
+			var val;
+			if(this.maybe("=")) {
+				if(d) fail this.error("Non-default arg follows default arg");
+				d = true;
+				val = this.expr(PRECS[',']);
+			}
+			args.push([name, val]);
+			
+			if(not this.maybe(",")) break;
+		}
+		this.expect(")");
+		
+		return args;
+	}
+	
+	parse_while() {
+		return this.condition(), this.block();
+	}
+	
+	#**
+	 * Parses a "block", which is an expression which prioritizes curly-brace
+	 * blocks over object literals and considers the semicolon to end the
+	 * expression rather than continue it.
+	**# 
+	block() {
+		if(this.maybe("{")) {
+			this.semi() after this.expect("}");
+		}
+		else this.expr(0) after this.maybe(";");
+	},
+	
+	#########################
+	### Special-operators ###
+	#########################
+	
+	#**
+	 * Parse a block as a chain of expressions possibly separated by
+	 *  semicolons. This is the lowest precedence / loosest binding of all
+	 *  the precedence classes.
+	**#
+	semi() {
+		var ls = [
+			...loop {
+				while(this.maybe(";")) {}
+			}
+			while(var val = this.expr(0)) val
+		];
+		
+		if(ls.length == 0) return none;
+		if(ls.length == 1) return ls[0];
+		return new Block(ls);
+	},
+	
+	######################
+	### Normal parsing ###
+	######################
+	
+	#**
+	 * Normal arithmetic operators with no special parsing. This covers a
+	 *  wide number of precedence classes, so it has logic for precedence
+	 *  climbing.
+	**#
+	expr(min_prec) {
+		var lhs = this.attr(), op, prec
+		while(var tok = this.maybe(none, ["op", "cmp"])) {
+			# Binary infix operators
+			op = tok.value;
+			prec = PRECS[op];
+			
+			if(prec < min_prec) break;
+			
+			if(var rhs = this.expr(prec + not (op in RIGHT))) {
+				lhs = new Op(op, lhs, rhs);
+			}
+			else break;
+		}
+		
+		return lhs;
+	},
+	
+	#**
+	 * Most tightly binding operator precedence classes with some special
+	 *  parsing.
+	**#
+	attr() {
+		var lhs = this.atom(), tok, args;
+		loop {
+			# Function calls
+			if(this.maybe("(")) {
+				lhs = new Call(lhs, ...do {
+					while(var val = this.expr(PRECS[','])) {
+						yield val;
+						
+						if(!this.maybe(",")) break;
+					}
+				});
+				this.expect(")");
+			}
+			# Item indexing
+			else if(this.maybe("[")) {
+				lhs = new Op('[]', lhs, this.semi());
+				this.expect(']');
+			}
+			# Binary access operators like . -> ::
+			else if(tok = this.peek(".")) {
+				this.consume();
+				lhs = new Op('.', lhs, this.relaxid());
+			}
+			else break;
+		}
+		
+		return lhs;
+	},
+	
+	#**
+	 * Lexical units which function as single ast nodes with no need for
+	 *  scanning ahead.
+	**#
+	atom() {
+		var cur = this.peek(), val = cur.value, ct = cur.type;
+		
+		# Tokens which signal non-atom
+		if(val in [")", "]", "}", ";", "case", "default", "else"]) return none;
+		
+		this.consume();
+		
+		switch(ct) {
+			case "dec"=> ['const', int(cur.match[1], 10)];
+			case "sq": case "dq":
+			case "sq3": case "dq3" => ['const', stresc(cur.match[1])];
+			case "bq": case "bq3" => ['const', cur.match[1]];
+			case "id" => ['id', cur.value];
+			case "op" => [op, this.expr(PRECS[val])];
+			
+			case "punc" => {
+				if(val == "(") {
+					this.semi() after this.expect(")");
+				}
+				else if(val == '[') {
+					['list', [...do {
+						while(var val = this.expr(PRECS[','])) {
+							yield val;
+							if(!this.maybe(",")) break;
+						}
+					}]] after this.expect("]");
+				}
+				else if(val == "{") {
+					['object', [...do {
+						while(val = this.expr(PRECS[','])) {
+							var key = this.relaxid();
+							
+							yield [key,
+								if(this.maybe(":")) this.expr(PRECS[','])
+								else ['fn', key, this.funcargs(), this.block()]
+							];
+							
+							if(not this.maybe(",")) break;
+						}
+					}]] after this.expect("}");
+				}
+				#else if(val == ")") break;
+				#else if(val == ']') break;
+				#else if(val == "}") break;
+				
+				else fail this.error("NotImplemented: " + val);
+			}
+			
+			case "kw": switch(val) {
+				case "if" =>
+					['if', this.condition(),
+						this.block(),
+						this.maybe("else") and this.block()
+					];
+				
+				case "loop" => {
+					var always = this.block();
+					if(this.maybe("while")) {
+						['loop', always, ...this.parse_while()];
+					}
+					else ['loop', always];
+				}
+				
+				case "while" => ['loop', none, ...this.parse_while()];
+				
+				case "for" => {
+					var paren = this.expect("(");
+					
+					this.expect("var");
+					var itvar = this.destruct();
+					
+					this.expect("in");
+					var iter = this.expr(PRECS[',']);
+					
+					if(paren) this.expect(")");
+					
+					['for', itvar, iter, this.block()];
+				}
+				
+				case "switch" => {
+					var ex = this.condition(), cs = [], de = false, val;
+					
+					this.expect("{");
+					while(!this.maybe("}")) {
+						if(this.maybe("case")) {
+							val = this.expr(0);
+						}
+						else if(this.maybe("default")) {
+							if(de) fail this.error("Duplicate default case");
+							de = false;
+							val = none;
+						}
+						
+						# Fallthrough
+						ft = this.expect([":", "=>"]).value
+						 
+						bl = this.block();
+						cases.push(
+							[(if(val) 'case' else 'default'), ft, val, bl]
+						);
+					}
+					
+					['switch', cond, cases];
+				}
+				
+				case "break":
+				case "continue":
+				case "return":
+				case "fail" => ['fail', this.expr(0)];
+				
+				case "var" =>
+					['var', [...loop this.destruct() while(this.maybe(","))]];
+				
+				case "function":
+					return ['fn', this.relaxid(), this.funcargs(), this.block()];
+			}
+			
+			default: fail this.error("Unknown token \{ct} = \{val}");
+		}
+	}
+}

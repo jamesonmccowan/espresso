@@ -1,0 +1,809 @@
+proto struct {
+	proto(name, props) {
+		var _static = {}, _inst = {};
+		for(var prop in props) {
+			if(prop.static) _static[key] = prop;
+			else _inst[key] = prop;
+		}
+		
+		const class = new object(this) {
+			name,
+			instance: none,
+			..._static,
+			
+			new(...args) {
+				return gc.struct(_inst);
+			}
+		};
+		const instance = new object(this.instance) {
+			class, ..._inst
+		};
+		class.instance = instance;
+	}
+}
+
+props: {[string]: property}
+property {
+	access: "public"|"protected"|"private",
+	static: bool,
+	const: bool,
+	type: var?,
+	value: var?
+}
+
+proto.public|!proto.static|!proto.const
+property("public", false, false, "op", string)
+property("public", false, false, "lhs", AST)
+property("public", false, false, "rhs", AST)
+
+
+GC struct schema:
+
+dict[string, (typeof, int)]
+
+function getattr(this, name) {
+	if(typeof this == struct) {
+		const schema = gc.slot(this, 1);
+		const [type, offset] = schema[name];
+		return gc.bytes(this)[offset: sizeof(type)] as type;
+	}
+}
+
+# "selector" is a generic function selecting a method from an object. The most
+#  common case would simply be ob[methodname]
+function dispatch(selector, ...args) {
+	var ordering = [], rank = {}, visited = set(), method;
+	for(var index in ..args) {
+		var position = 0;
+		ordering.push(args[index]);
+		while(ordering) {
+			arg = ordering.pop();
+			for(var role in selector(arg, index)) {
+				(rank[role] ??= {})[index] = position;
+				if(method is none) {
+					if(rank[role] < rank[method]) {
+						method = role;
+					}
+					# If we found another and it's still worse, the one we
+					#  already have is the best
+					else return method;
+				}
+			}
+			# This is used by multiple-inheritance to convert a depth-first
+			#  into breadth-first search
+			for(var delegate in arg.delegates) {
+				if(delegate not in visited) {
+					ordering.push(delegate);
+					visited.add(delegate);
+				}
+			}
+		}
+	}
+	return method;
+}
+
+proto {
+	private static methods: dict[method, int]
+}
+
+
+
+#**
+ * Theory of operation for this VM: The AST is codified as an S-exp tree of
+ *  lists. Evaluation is done recursively, with nonlocal control (such as
+ *  return, fail, break, continue, etc) being handled by a `ctrl` property
+ *  and an optional `value` property for exceptions/returns.
+**#
+var VM = {
+	"init": function(scope) {
+		this.ctrl = none;
+		this.value = none;
+		this.stack = [];
+		this.scope = [scope];
+	},
+	"signal": function(tag) {
+		if(this.ctrl is none) this.ctrl = tag;
+	},
+	"handle": function(tag) {
+		if(this.ctrl == tag) {
+			this.ctrl = none;
+			return true;
+		}
+		return false;
+	},
+	"push_block": function(block) {
+		if(block is none) block = {};
+		this.scope.push_front(block);
+	},
+	"pop_block": function() {
+		this.scope.pop_front();
+	},
+	"resolve": function(name) {
+		for(var scope in this.scope) {
+			if(name in scope) return scope;
+		}
+		return this.scope[0];
+	},
+	"assign": function(lhs, rhs) {
+		if(lhs[0] == "id") {
+			this.resolve(lhs[1])[lhs[1]] = rhs;
+		}
+		else fail "Assign to " + lhs[0];
+	},
+	"unary": function(op, val) {
+		val = this.rval(val);
+		switch(op) {
+			default: fail "NotImplemented: unary op " + op;
+		}
+	},
+	"binary": function(op, lhs, rhs) {
+		if(op == "=") {
+			lhs = this.lval(lhs);
+			rhs = this.rval(rhs);
+			lhs.set(rhs);
+			return rhs;
+		}
+		
+		lhs = this.rval(lhs);
+		rhs = this.rval(rhs);
+		switch(op) {
+			case "+": return lhs + rhs;
+			case "-": return lhs - rhs;
+			
+			case "==": return lhs == rhs;
+			case "!=": return lhs != rhs;
+			case "<": return lhs < rhs;
+			case "<=": return lhs <= rhs;
+			case ">": return lhs > rhs;
+			case ">=": return lhs >= rhs;
+			case "is": return lhs is rhs;
+			case "in": return lhs in rhs;
+			
+			default: fail "NotImplemented: binary op " + op;
+		}
+	},
+	# Evaluate an AST as an l-value
+	"lval": function(ast) {
+		var lhs, rhs;
+		switch(ast[0]) {
+			case ".":
+				lhs = this.rval(ast[1]);
+				rhs = this.rval(ast[2]);
+				return {
+					"typename": "lvalue",
+					"get": function() {
+						return lhs[rhs];
+					},
+					"set": function(value) {
+						lhs[rhs] = value;
+					}
+				}
+			
+			default: fail "Not an lvalue: " + ast[0];
+		}
+	},
+	# Evaluate an AST as an r-value
+	"rval": function(ast) {
+		if(ast is none or this.ctrl) return none;
+		
+		var result;
+		switch(ast[0]) {
+			case "const": return ast[1];
+			
+			case "id":
+				return self.resolve(ast[1])[ast[1]]
+			
+			## Expressions without results ##
+			
+			case "var":
+				for(var v in ast[1]) {
+					this.lval(v[0]).set(this.rval(v[1]));
+				}
+				break;
+			
+			case "fail":
+				this.signal("fail");
+				this.value = {
+					"typename": "Error",
+					"error": this.rval(ast[1]),
+					"stack": this.stack.copy()
+				};
+				break;
+			
+			case "return":
+				this.value = this.rval(ast[1]);
+			
+			case "break":
+			case "continue":
+				this.signal(ast[0]);
+				break;
+			
+			case "progn":
+			case "block":
+				this.push_block();
+				for(var stmt in ast[1]) {
+					this.rval(stmt);
+					if(this.ctrl) break;
+				}
+				this.pop_block();
+				break;
+			
+			case "loop":
+				this.push_block();
+				loop {
+					this.rval(ast[1]);
+					if(this.handle("continue")) continue;
+				# any non-continue will break
+				} while(this.rval(ast[2])) {
+					this.rval(ast[3]);
+				}
+				this.pop_block();
+				this.handle("break");
+				break;
+			
+			case "for":
+				# (for itvar iter body)
+				this.push_block();
+				
+				var itvar;
+				itvar = this.lval(ast[1]);
+				for(var e in this.rval(ast[2])) {
+					itvar.set(e);
+					this.rval(ast[3]);
+					if(this.handle("continue")) continue;
+					if(this.ctrl) break;
+				}
+				this.pop_block();
+				this.handle("break");
+				break;
+			
+			case "switch":
+				this.push_block();
+				
+				tmp = this.rval(ast[1]);
+				if(this.ctrl) {
+					this.pop_block();
+					this.handle("break");
+					break;
+				}
+				
+				var i, de, it;
+				i = 0;
+				it = iter(ast[2]);
+				for(var sc in it) {
+					# (op value body)
+					if(sc[0] == "case") {
+						if(this.rval(sc[1]) == tmp) {
+							for(var sc in it) {
+								if(this.ctrl) break;
+								this.rval(sc[2])
+							}
+							break;
+						}
+					}
+					else de = i;
+					
+					i = i + 1;
+				}
+				
+				if(not (de is none)) result = this.rval(ast[2][de][3]);
+				
+				this.pop_block();
+				this.handle("break");
+				break;
+			
+			## Expressions with results ##
+			
+			case "list":
+				result = [];
+				for(var el in ast[1]) {
+					result.push(this.rval(el));
+				}
+				break;
+			
+			case "object":
+				result = {};
+				for(var el in ast[1]) {
+					result[this.rval(el[0])] = this.rval(el[1]);
+				}
+				break;
+			
+			case "fn":
+				result = {
+					"typename": "function",
+					"name": this.rval(ast[1]), args: ast[2],
+					"body": ast[3], "scope": this.scope
+				};
+				break;
+			
+			case "call":
+				var fn, args, a;
+				fn = this.rval(ast[1]);
+				args = {}
+				a = 0;
+				while(a < ast[2].length) {
+					args[fn.args[a][0]] = this.rval(ast[2][a]);
+				}
+				
+				this.stack.push(this.scope); # Store context
+				this.scope = fn.scope.copy(); # Load closure context
+				this.push_block(args);
+				result = this.rval(fn.body); # Execute function
+				this.scope = this.stack.pop(); # Restore original context
+				
+				if(this.handle("return")) result = this.value;
+				else if(this.ctrl != "fail") {
+					# Clear signals that don't cross function boundaries
+					this.ctrl = none;
+				}
+				break;
+			
+			case "if":
+				this.push_block();
+				result = this.rval(if(this.rval(ast[1])) ast[2] else ast[3]);
+				this.pop_block();
+				break;
+			
+			case ".":
+				result = this.lval(ast[1]).get(this.rval(ast[2]));
+				break;
+			
+			case "and":
+				result = this.rval(ast[1]) and this.rval(ast[2]);
+				break;
+			
+			case "or":
+				result = this.rval(ast[1]) or this.rval(ast[2]);
+				break;
+			
+			# Normal ops
+			default:
+				result =
+					if(ast.length == 2) this.unary(ast[0], ast[1]);
+					else this.binary(ast[0], ast[1], ast[2]);
+		}
+		
+		if(this.ctrl) none else result;
+	},
+	# Evaluate an expression and catch any uncaught errors
+	"eval": function(expr) {
+		var result;
+		result = this.rval(expr);
+		if(this.handle("fail")) {
+			print(this.value);
+		}
+		
+		return result;
+	}
+};
+
+var f, ast, sys;
+
+sys = import("sys");
+
+f = open(sys.argv[1]);
+Parser.init(f.read());
+f.close();
+
+ast = Parser.parse();
+print(ast);
+VM.init({
+	"none": none,
+	"true": true,
+	"false": false,
+	"print": print,
+	"import": import,
+	"list": list,
+	"open": open
+});
+
+print(VM.eval(ast));
+
+-----------
+
+proto Parser {
+	init(src) {
+		this.src = src;
+		this.ctx = Context(0, 1, 1);
+		this.cur = none;
+		this.consume();
+	}
+	
+	##############
+	### Lexing ###
+	##############
+	
+	#**
+	 * Reposition the parser based on the token match and return the old
+	 *  context.
+	**#
+	repos(m) {
+		m?
+		
+		var
+			old = this.ctx,
+			l = old.line,
+			c = old.col,
+			p = old.pos + m[0].length;
+		
+		var lines = NEWLINE.split(m[0]);
+		if(lines.length > 1) {
+			l += lines.length - 1;
+			c = lines[-1].length;
+		}
+		else c += m[0].length;
+		
+		this.ctx = new Context(p, l, c);
+		return old;
+	}
+	
+	error(msg) return {"typename": "Error", "msg": msg, "ctx": this.ctx};
+	match(reg) reg.match(this.src, this.ctx.pos);
+	
+	next(): Token? {
+		var m, type;
+		while(m = this.match(COMMENT)) {
+			this.repos(m);
+		}
+		this.repos(this.match(SPACE));
+		
+		m = this.match(TOKEN)?;
+		
+		if(m[0] in KW) type = "kw";
+		else if(m[0] in KWOP) type = "op";
+		else {
+			var tt_gc = TG[m.lastindex];
+			if(tt_gc is none) fail "Invalid regex group " + m.lastindex;
+			
+			m = m.groups()[slice(m.lastindex - 1, m.lastindex + tt_gc[1])];
+			type = tt_gc[0];
+		}
+		
+		new Token(type, match, this.repos(m));
+	}
+	
+	#######################
+	### Generic parsing ###
+	#######################
+	
+	consume() return this.cur = this.next();
+	peek(value, type): Token? {
+		var cur = this.cur?
+		if(ineq(cur.value, value) and ineq(cur.type, type)) {
+			return cur;
+		}
+	}
+	maybe(value, type) {
+		this.peek(value, type) after?? this.consume();
+	}
+	expect(value, type) {
+		var tok = this.peek(value, type);
+		if(tok) {
+			this.consume();
+			return tok;
+		}
+		tok = this.peek();
+		fail this.error("Expected " + (value or type) + ", got " + tok.type + ":" + tok.value);
+	}
+	
+	expected(what) {
+		this.error("Expected " + what + ", got " + this.peek());
+	}
+	
+	parse() AST("progn", this.semi());
+	
+	###############
+	### Clauses ###
+	###############
+	
+	condition() {
+		if(this.maybe("(")) {
+			this.expr() after this.expect(")");
+		}
+		else this.expr();
+	}
+	
+	funcargs() {
+		this.expect("(");
+		var args = [];
+		loop {
+			args.push(this.atom());
+		} while(this.maybe(","));
+		this.expect(")");
+		
+		[...loop this.atom() while(this.maybe(","))] after this.expect(",");
+		
+		return args;
+	}
+	
+	relaxid() {
+		if(let tok = this.maybe(none, ["id", "kw", "op", "cmp", "assign"]) tok.value;
+		else if(let tok = this.maybe(none, ['sq', 'dq', 'bq'])) tok.match[1];
+	}
+	ident() {
+		if(var tok = this.maybe(none, "id")) tok.value;
+	}
+	
+	block() {
+		var x, tok;
+		if(tok = this.maybe("{")) {
+			x = this.semi();
+			this.expect("}");
+			x.origin(tok);
+		}
+		else {
+			x = this.expr(0);
+			this.maybe(";");
+		}
+		return x;
+	}
+	
+	#########################
+	### Special-operators ###
+	#########################
+	
+	#**
+	 * Parse a block as a chain of expressions possibly separated by
+	 *  semicolons. This is the lowest precedence / loosest binding of all
+	 *  the precedence classes.
+	**#
+	semi() {
+		var ls = [];
+		loop {
+			while(this.maybe(";")) {}
+		}
+		while(var val = this.expr(0)) {
+			if(val.type == 'fn') {
+				var name = new AST('id', val.args[0].args[0]);
+				ls.push(new AST('var', [[name, val]]).origin(tok));
+			}
+			else ls.push(val);
+		}
+		
+		if(ls.length == 1) ls[0];
+		else new AST('block', ls);
+	}
+	
+	######################
+	### Normal parsing ###
+	######################
+	
+	expr(min_prec) {
+		var tok = this.peek(), lhs, rhs;
+		
+		if(tok.value in UNARY) {
+			this.consume();
+			if(tok.value in SPECIAL) {
+				lhs = SPECIAL[tok.value](tok);
+			}
+			else {
+				lhs = new AST(tok.value, none, this.expr());
+			}
+		}
+		else {
+			lhs = this.atom();
+			if(lhs is none) return;
+		}
+		
+		loop {
+			tok = this.peek([".", "(", "["]) or this.peek(none, ["op", "cmp"]);
+			if(tok is none) break;
+			
+			var op = tok.value, prec = PRECS[op];
+			if(prec is none or prec < min_prec) break;
+			
+			this.consume();
+			
+			if(op in SPECIAL) {
+				lhs = SPECIAL[op](lhs, tok);
+			}
+			# Postfix
+			else if(op in UNARY) {
+				lhs = new AST(op, lhs, none);
+			}
+			else {
+				rhs = this.expr(prec + not (op in RIGHT));
+				if(rhs is none) break;
+				lhs = new AST(op, lhs, rhs).origin(tok);
+			}
+		}
+		
+		return lhs;
+	}
+	
+	atom_tuple() {
+		var x = this.semi();
+		this.expect(")");
+		return x;
+	}
+	
+	atom_list() {
+		var vals = [];
+		while(var val = this.expr(PRECS[','])) {
+			vals.push(val);
+			
+			if(not this.maybe(",")) break;
+		}
+		this.expect("]");
+		
+		new AST('list', [vals]);
+	}
+	
+	atom_object() {
+		var entries = [];
+		while(not this.maybe("}")) {
+			var nt = this.peek(), value;
+			var name = new AST('const', [this.relaxid()]);
+			
+			if(this.peek("(")) {
+				var args = this.funcargs();
+				var body = this.block();
+				value = new AST('fn', [name, args, body]);
+			}
+			else {
+				this.expect(":");
+				value = this.expr(PRECS[',']);
+			}
+			entries.push([name, value]);
+			
+			this.maybe(",");
+		}
+		
+		new AST('object', entries);
+	}
+	
+	kw_if() {
+		var
+			cond = this.condition(),
+			th = this.block(),
+			el = if(this.maybe("else")) this.block() else none;
+		
+		new AST('if', [cond, th, el]);
+	}
+	
+	kw_loop() {
+		var always = this.block();
+		if(this.maybe("while")) {
+			new AST('loop', [always, this.condition(), this.block()]);
+		}
+		else new AST('loop', [always])
+	}
+	
+	kw_while() {
+		new AST('loop', [this.condition(), this.block()]);
+	}
+	
+	kw_for() {
+		this.expect("(");
+		this.expect("var");
+		
+		var itvt = this.peek();
+		var itvar = new AST("id", [this.relaxid()]);
+		this.expect("in");
+		
+		var iter = this.expr(PRECS[',']);
+		this.expect(")");
+		
+		new AST('for', [itvar, iter, this.block()]);
+	}
+	
+	kw_switch() {
+		var cond = this.condition(), cs = [], de = false, lt, val;
+		
+		this.expect("{");
+		while(not this.maybe("}")) {
+			if(lt = this.maybe("case")) {
+				val = this.expr();
+			}
+			else if(lt = this.maybe("default")) {
+				if(de) fail this.error("Duplicate default case");
+				de = true;
+				val = none;
+			}
+			else fail this.expected("case or default");
+			
+			var fts = this.expect([":", "=>"]).value;
+			
+			var op = if(val) 'case' else 'default';
+			cs.push(new AST(op, [val, fts, this.semi()]));
+		}
+		
+		new AST('switch', [cond, cs]);
+	}
+	
+	kw_retfail() new AST(tok.value, this.expr(0));
+	
+	kw_var() {
+		var vars = [];
+		loop {
+			var nt = this.peek();
+			var name = this.relaxid(), value;
+			name = new AST("id", name);
+			
+			if(this.maybe("=")) {
+				value = this.expr(0);
+			}
+			
+			vars.push([name, value]);
+		} while(this.maybe(","));
+		
+		new AST('var', vars);
+	}
+	
+	kw_function() {
+		var nt = this.peek();
+		var name = new AST("const", this.relaxid());
+		
+		new AST('fn', name, this.funcargs(), this.block());
+	}
+	
+	#**
+	 * Lexical units which function as single ast nodes with no need for
+	 *  scanning ahead.
+	**#
+	atom() {
+		var cur = this.peek();
+		if(cur is none) return;
+		
+		var val = cur.value, ct = cur.type;
+		
+		# Tokens which signal non-atom
+		if(val in [")", "]", "}", ',', ";", "case", "default", "else"]) {
+			return none;
+		}
+		
+		this.consume();
+		
+		var result = switch(ct) {
+			case "dec" => new AST("const", int(val, 10));
+			case "sq":
+			case "dq" => new AST("const", stresc(cur.match[1]));
+			case "bq" => new AST("const", cur.match[1]);
+			case "id" => new AST("id", val);
+			case "op" => new AST(val, this.expr(PRECS[val]));
+			
+			case "punc":
+				if(val == "(") this.atom_tuple();
+				else if(val == "[") this.atom_list();
+				else if(val == "{") this.atom_object();
+				
+				#else if(val == ")") break;
+				#else if(val == ']') break;
+				#else if(val == "}") break;
+				
+				else fail this.error("NotImplemented: " + val);
+			
+			case "kw": switch(val) {
+				case "if" => this.kw_if();
+				case "loop" => this.kw_loop();
+				case "while" => this.kw_while();
+				case "for" => this.kw_for();
+				case "switch" => this.kw_switch();
+				case "var" => this.kw_var();
+				case "function" => this.kw_function();
+				
+				case "break":
+				case "continue" => new AST(val);
+				
+				case "return":
+				case "fail" => this.kw_retfail();
+				
+				case:
+					fail this.error("Unknown keyword " + val);
+			}
+			
+			case: fail this.error("Unknown token " + ct + " = " + val);
+		}
+		
+		result.origin(cur);
+	}
+}
+
+var json = import("json");
+
+var f = open(argv[0]);
+var p = new Parser(f.read());
+f.close();
+var ast = p.parse();
+print(ast);
+print(json.dumps(ast));
